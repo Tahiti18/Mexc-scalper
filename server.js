@@ -48,7 +48,7 @@ const mexc = new ccxt.mexc({
   apiKey: E('MEXC_KEY',''),
   secret: E('MEXC_SECRET',''),
   enableRateLimit: true,
-  options: { defaultType: 'swap' }
+  options: { defaultType: 'swap' } // USDT-M perps
 });
 
 // state
@@ -76,23 +76,26 @@ function ensureBucket(){
   if (daily.key!==key){ daily.key=key; daily.pnl=0; daily.trades=0; fills.length=0; inv.clear(); lossStreak.clear(); haltedUntil.clear(); log('Daily reset '+key); }
 }
 
-// *** PATCHED verify() — adds support for ?secret= in URL (TradingView-friendly) ***
+// >>> Patched verify() — accepts secret in body, query, or header; keeps optional HMAC <<<
 function verify(req){
-  // 1) Allow ?secret=... (works with TradingView which can’t add headers)
+  // Accept ?secret= in the URL (TradingView-friendly)
   try {
     const url = new URL(req.protocol + '://' + req.get('host') + req.originalUrl);
     const qsSecret = url.searchParams.get('secret');
     if (qsSecret && SECRET && qsSecret === SECRET) return true;
   } catch {}
 
-  // 2) Original header-based check for forwarders that set headers
-  const basic = SECRET && (req.get('X-Webhook-Secret')===SECRET);
+  // Accept {"secret":"..."} inside JSON body (TradingView-friendly)
+  if (SECRET && req.body && req.body.secret === SECRET) return true;
 
-  // 3) Optional HMAC (if you later put a signing forwarder in front)
+  // Original header option for forwarders
+  const basic = SECRET && (req.get('X-Webhook-Secret') === SECRET);
   if (!HMAC_ENABLED) return basic;
-  const sig=req.get(HMAC_HEADER)||'';
-  const mac=crypto.createHmac('sha256', HMAC_SECRET).update(raw||Buffer.from('')).digest('hex');
-  return basic || (sig && sig===mac);
+
+  // Optional HMAC (only if you front with a signing proxy)
+  const sig = req.get(HMAC_HEADER) || '';
+  const mac = crypto.createHmac('sha256', HMAC_SECRET).update(raw || Buffer.from('')).digest('hex');
+  return basic || (sig && sig === mac);
 }
 
 async function spreadPct(sym){
@@ -272,7 +275,7 @@ app.post('/webhook', async (req,res)=>{
     daily.trades += 1;
     log(`EXEC ${signal} ${symbol} notional=${notional} lev=${lev}`);
 
-    // schedule auto-close
+    // schedule auto-close (for true scalps)
     if (!DRY && relayTimer && autoCloseSec>0 && (signal==='LONG' || signal==='SHORT')){
       setTimeout(async ()=>{
         try{
