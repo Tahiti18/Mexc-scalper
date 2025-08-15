@@ -1,4 +1,3 @@
-
 import 'dotenv/config';
 import express from 'express';
 import ccxt from 'ccxt';
@@ -76,13 +75,26 @@ function ensureBucket(){
   const key = startBucket().toISOString().slice(0,10)+`@${DAILY_RESET_HOUR_UTC}`;
   if (daily.key!==key){ daily.key=key; daily.pnl=0; daily.trades=0; fills.length=0; inv.clear(); lossStreak.clear(); haltedUntil.clear(); log('Daily reset '+key); }
 }
+
+// *** PATCHED verify() — adds support for ?secret= in URL (TradingView-friendly) ***
 function verify(req){
+  // 1) Allow ?secret=... (works with TradingView which can’t add headers)
+  try {
+    const url = new URL(req.protocol + '://' + req.get('host') + req.originalUrl);
+    const qsSecret = url.searchParams.get('secret');
+    if (qsSecret && SECRET && qsSecret === SECRET) return true;
+  } catch {}
+
+  // 2) Original header-based check for forwarders that set headers
   const basic = SECRET && (req.get('X-Webhook-Secret')===SECRET);
+
+  // 3) Optional HMAC (if you later put a signing forwarder in front)
   if (!HMAC_ENABLED) return basic;
   const sig=req.get(HMAC_HEADER)||'';
   const mac=crypto.createHmac('sha256', HMAC_SECRET).update(raw||Buffer.from('')).digest('hex');
   return basic || (sig && sig===mac);
 }
+
 async function spreadPct(sym){
   const ob=await mexc.fetchOrderBook(sym,5).catch(()=>null);
   if(!ob || !ob.bids?.length || !ob.asks?.length){ if(REJECT_IF_THIN_BOOK) throw new Error('thin_book'); return Infinity; }
