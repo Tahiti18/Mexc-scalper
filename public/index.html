@@ -1,0 +1,502 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>MEXC Scalper • Demo Dashboard (Advanced)</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+:root { --bg:#0b1220; --fg:#eaf0ff; --mut:#8fa1c7; --card:#121a2b; --pill:#1f2b45; --accent:#1a73e8; }
+body { margin:0; font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; color:var(--fg); background:var(--bg);}
+header { padding:16px 20px; border-bottom:1px solid #1a2238; display:flex; align-items:center; gap:14px;}
+h1 { margin:0; font-size:20px; color:var(--accent);}
+.pill {background:var(--pill); padding:6px 10px; border-radius:999px; color:var(--mut); font-size:12px;}
+a.link { color:#9fc5ff; text-decoration:none; } a.link:hover{ text-decoration:underline; }
+
+.wrap { padding:18px; display:grid; grid-template-columns: 1.3fr 1fr; gap:18px;}
+.card { background:var(--card); border:1px solid #1a2238; border-radius:10px; padding:14px;}
+h2 { margin:0 0 10px; font-size:16px; color:#cfe1ff;}
+.grid { display:grid; grid-template-columns: repeat(3,1fr); gap:10px;}
+.kpi { background:#0e1526; border:1px solid #1a2238; border-radius:8px; padding:10px;}
+.kpi .v { font-size:18px; margin-top:4px;}
+table { width:100%; border-collapse:collapse; font-size:12px;}
+td,th { padding:6px 8px; border-bottom:1px solid #1a2238; color:#cfe1ff; text-align:left;}
+.logs { max-height:240px; overflow:auto; font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, mono; font-size:12px; background:#0e1526; border:1px solid #1a2238; border-radius:8px; padding:10px;}
+.smallgrid { display:grid; grid-template-columns: repeat(2,1fr); gap:10px; }
+.streak { background:#0e1526; border:1px solid #1a2238; border-radius:8px; padding:10px; }
+.row { display:flex; gap:10px; align-items:center; }
+input, select, button { background:#0e1526; color:#eaf0ff; border:1px solid #1a2238; border-radius:6px; padding:6px 8px; }
+button { cursor:pointer; }
+</style>
+</head>
+<body>
+<header>
+  <h1>MEXC Scalper • Demo Dashboard</h1>
+  <span class="pill" id="drypill">DRY</span>
+  <span class="pill" id="haltpill">LIVE</span>
+  <span class="pill" id="masterpill">MASTER: LIVE</span>
+  <a class="pill link" id="pnlcsv" target="_blank">pnl.csv</a>
+  <a class="pill link" id="logscsv" target="_blank">logs.csv</a>
+  <a class="pill link" id="config" target="_blank">config</a>
+</header>
+
+<div class="wrap">
+  <div class="card">
+    <h2>Equity Curve (realized PnL)</h2>
+    <canvas id="eq"></canvas>
+  </div>
+
+  <div class="card">
+    <h2>Performance</h2>
+    <div class="grid" id="kpis"></div>
+    <div class="smallgrid" style="margin-top:10px">
+      <div class="streak">
+        <div><b>Streaks</b></div>
+        <div>Current Wins: <span id="cwin">—</span></div>
+        <div>Current Losses: <span id="closs">—</span></div>
+        <div>Max Wins: <span id="mwin">—</span></div>
+        <div>Max Losses: <span id="mloss">—</span></div>
+      </div>
+      <div class="streak">
+        <div><b>Drawdown</b></div>
+        <div>Max DD (USDT): <span id="ddval">—</span></div>
+        <div>Peak/Valley visible in chart</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Drawdown Curve (USDT from peak)</h2>
+    <canvas id="dd"></canvas>
+  </div>
+
+  <div class="card">
+    <h2>Win/Loss Distribution (Realized USDT per trade)</h2>
+    <canvas id="hist"></canvas>
+  </div>
+
+  <div class="card">
+    <h2>Daily Summary (UTC @ reset)</h2>
+    <table id="daily">
+      <thead>
+        <tr>
+          <th>Day@Hour</th><th>Trades</th><th>Wins</th><th>Losses</th>
+          <th>Win%</th><th>PF</th><th>Gross P</th><th>Gross L</th><th>Net</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Live Feed</h2>
+    <div class="logs" id="live"></div>
+  </div>
+
+  <div class="card">
+    <h2>Recent Trades</h2>
+    <table id="trades">
+      <thead><tr><th>Time (UTC)</th><th>Symbol</th><th>Side</th><th>Price</th><th>Size</th><th>Realized</th><th>Fee</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Simulator Control</h2>
+    <div class="grid" style="grid-template-columns: repeat(4, 1fr); gap:10px;">
+      <div class="kpi">
+        <div><b>Dashboard Token</b></div>
+        <input id="admintok" type="password" placeholder="Paste DASHBOARD_TOKEN" style="width:100%;margin-top:6px;">
+        <button id="saveTok" style="margin-top:6px;width:100%;">Save</button>
+      </div>
+      <div class="kpi">
+        <div><b>Symbol</b></div>
+        <input id="sym" value="BTC/USDT:USDT" style="width:100%;margin-top:6px;">
+        <div style="margin-top:6px;font-size:12px;color:#8fa1c7;">MEXC format</div>
+      </div>
+      <div class="kpi">
+        <div><b>Count</b></div>
+        <input id="count" type="number" value="25" min="1" max="1000" style="width:100%;margin-top:6px;">
+        <div style="margin-top:6px;font-size:12px;color:#8fa1c7;"># trades / points</div>
+      </div>
+      <div class="kpi">
+        <div><b>Win-Rate</b></div>
+        <input id="winrate" type="number" step="0.01" value="0.55" style="width:100%;margin-top:6px;">
+        <div style="margin-top:6px;font-size:12px;color:#8fa1c7;">0..1</div>
+      </div>
+    </div>
+
+    <div class="grid" style="grid-template-columns: repeat(4, 1fr); gap:10px; margin-top:10px;">
+      <div class="kpi">
+        <div><b>Avg Win (USDT)</b></div>
+        <input id="avgwin" type="number" step="0.01" value="0.30" style="width:100%;margin-top:6px;">
+      </div>
+      <div class="kpi">
+        <div><b>Avg Loss (USDT)</b></div>
+        <input id="avgloss" type="number" step="0.01" value="0.25" style="width:100%;margin-top:6px;">
+      </div>
+      <div class="kpi">
+        <div><b>Notional (USDT)</b></div>
+        <input id="notional" type="number" step="1" value="20" style="width:100%;margin-top:6px;">
+      </div>
+      <div class="kpi">
+        <div><b>Mix</b></div>
+        <select id="mix" style="width:100%;margin-top:6px;">
+          <option value="alt">alt</option>
+          <option value="long">long</option>
+          <option value="short">short</option>
+          <option value="rand">rand</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="grid" style="grid-template-columns: repeat(4, 1fr); gap:10px; margin-top:10px;">
+      <div class="kpi">
+        <div><b>Jitter</b></div>
+        <input id="jitter" type="number" step="0.01" value="0.15" style="width:100%;margin-top:6px;">
+        <div style="margin-top:6px;font-size:12px;color:#8fa1c7;">± proportion</div>
+      </div>
+      <div class="kpi">
+        <div><b>Fee Rate</b></div>
+        <input id="feerate" type="number" step="0.0001" value="0.0006" style="width:100%;margin-top:6px;">
+        <div style="margin-top:6px;font-size:12px;color:#8fa1c7;">0.0006 = 6 bps</div>
+      </div>
+      <div class="kpi">
+        <div><b>Pause ms (min)</b></div>
+        <input id="pmin" type="number" value="40" style="width:100%;margin-top:6px;">
+      </div>
+      <div class="kpi">
+        <div><b>Pause ms (max)</b></div>
+        <input id="pmax" type="number" value="120" style="width:100%;margin-top:6px;">
+      </div>
+    </div>
+
+    <div class="row" style="gap:10px; margin-top:12px;">
+      <button id="btnFill">Sim Fill (+/- realized)</button>
+      <button id="btnSeq">Sim Seq (range)</button>
+      <button id="btnStrat">Sim Strategy (PnL only)</button>
+      <button id="btnStrat2">Sim Strategy2 (legs)</button>
+      <button id="btnReset" style="margin-left:6px;">Reset Stats</button>
+      <span id="simmsg" style="margin-left:10px; color:#8fa1c7;"></span>
+    </div>
+
+    <div class="row" style="gap:10px; margin-top:12px;">
+      <input id="cdsecs" type="number" value="120" min="1" style="width:110px;" placeholder="Cooldown (s)">
+      <button id="btnCooldown">Cooldown</button>
+      <button id="btnHalt" style="background:#3b0e0e;border:1px solid #5a1a1a;">Halt</button>
+      <button id="btnUnhalt" style="background:#0e2f10;border:1px solid #1d5a23;">Unhalt</button>
+    </div>
+
+    <div class="row" style="gap:10px; margin-top:12px;">
+      <button id="btnHaltAll" style="background:#3b0e0e;border:1px solid #5a1a1a;">Halt ALL</button>
+      <button id="btnUnhaltAll" style="background:#0e2f10;border:1px solid #1d5a23;">Unhalt ALL</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const BASE = "https://mexc-scalper-production.up.railway.app";
+document.getElementById('pnlcsv').href  = BASE + "/pnl.csv";
+document.getElementById('logscsv').href = BASE + "/logs.csv";
+document.getElementById('config').href  = BASE + "/config";
+
+const kDefs = [
+  { id:"trades", label:"Trades" },
+  { id:"winrate", label:"Win Rate" },
+  { id:"net", label:"Net PnL (USDT)" },
+  { id:"gprofit", label:"Gross Profit" },
+  { id:"gloss", label:"Gross Loss" },
+  { id:"pf", label:"Profit Factor" },
+  { id:"avgwin", label:"Avg Win" },
+  { id:"avgloss", label:"Avg Loss" },
+  { id:"dd", label:"Max Drawdown" }
+];
+function el(html){ const d=document.createElement('div'); d.innerHTML=html.trim(); return d.firstChild; }
+const kpiWrap = document.getElementById('kpis');
+kDefs.forEach(k => kpiWrap.appendChild(el(`<div class="kpi"><div>${k.label}</div><div class="v" id="${k.id}">—</div></div>`)));
+
+const eqChart = new Chart(document.getElementById('eq'), {
+  type:'line',
+  data:{ labels:[], datasets:[{ label:'Equity (USDT)', data:[], tension:0.2 }]},
+  options:{ animation:false, plugins:{legend:{display:false}}, scales:{x:{ticks:{autoSkip:true,maxRotation:0}}}
+});
+const ddChart = new Chart(document.getElementById('dd'), {
+  type:'line',
+  data:{ labels:[], datasets:[{ label:'Drawdown (USDT)', data:[], tension:0.2 }]},
+  options:{ animation:false, plugins:{legend:{display:false}}, scales:{x:{ticks:{autoSkip:true,maxRotation:0}}}
+});
+const histChart = new Chart(document.getElementById('hist'), {
+  type:'bar',
+  data:{ labels:[], datasets:[{ label:'Trades', data:[] }]},
+  options:{ animation:false, plugins:{legend:{display:false}} }
+});
+
+async function fetchJSON(u){ const r=await fetch(u,{cache:'no-store'}); if(!r.ok) throw new Error(r.status); return r.json(); }
+async function fetchText(u){ const r=await fetch(u,{cache:'no-store'}); if(!r.ok) throw new Error(r.status); return r.text(); }
+
+async function refresh(){
+  try{
+    const health = await fetchJSON(BASE + "/health");
+    document.getElementById('drypill').textContent = "DRY: " + String(health.dry);
+
+    const mp = document.getElementById('masterpill');
+    if (health.globalHalt) {
+      mp.textContent = 'MASTER: HALTED';
+      mp.style.background = '#8b1a1a';
+      mp.style.color = '#ffd7d7';
+    } else {
+      mp.textContent = 'MASTER: LIVE';
+      mp.style.background = '#1f2b45';
+      mp.style.color = '#8fa1c7';
+    }
+
+    const sym = (document.getElementById('sym').value || 'BTC/USDT:USDT').trim().toUpperCase();
+    const halted = health.halted && Object.prototype.hasOwnProperty.call(health.halted, sym);
+    const pill = document.getElementById('haltpill');
+    if (health.globalHalt || halted) {
+      pill.textContent = halted ? 'HALTED' : 'HALTED (MASTER)';
+      pill.style.background = '#5a1a1a';
+      pill.style.color = '#ffd7d7';
+    } else {
+      pill.textContent = 'LIVE';
+      pill.style.background = '#1f2b45';
+      pill.style.color = '#8fa1c7';
+    }
+  }catch{}
+
+  const s = await fetchJSON(BASE + "/stats");
+
+  document.getElementById('trades').textContent  = s.counts.trades;
+  document.getElementById('winrate').textContent = s.quality.winRate.toFixed(2) + "%";
+  document.getElementById('net').textContent     = s.pnl.net.toFixed(4);
+  document.getElementById('gprofit').textContent = s.pnl.grossProfit.toFixed(4);
+  document.getElementById('gloss').textContent   = s.pnl.grossLoss.toFixed(4);
+  document.getElementById('pf').textContent      = s.quality.profitFactor.toFixed(3);
+  document.getElementById('avgwin').textContent  = s.quality.avgWin.toFixed(4);
+  document.getElementById('avgloss').textContent = s.quality.avgLoss.toFixed(4);
+  document.getElementById('dd').textContent      = s.risk.maxDrawdown.toFixed(4);
+  document.getElementById('ddval').textContent   = s.risk.maxDrawdown.toFixed(4);
+
+  document.getElementById('cwin').textContent  = s.streaks.currentWins;
+  document.getElementById('closs').textContent = s.streaks.currentLosses;
+  document.getElementById('mwin').textContent  = s.streaks.maxWins;
+  document.getElementById('mloss').textContent = s.streaks.maxLosses;
+
+  const eqLabels = s.equity.map(p => new Date(p.ts).toISOString().slice(11,19));
+  eqChart.data.labels = eqLabels;
+  eqChart.data.datasets[0].data = s.equity.map(p => p.equity);
+  eqChart.update();
+
+  const ddLabels = s.drawdown.map(p => new Date(p.ts).toISOString().slice(11,19));
+  ddChart.data.labels = ddLabels;
+  ddChart.data.datasets[0].data = s.drawdown.map(p => p.dd);
+  ddChart.update();
+
+  histChart.data.labels = s.hist.labels;
+  histChart.data.datasets[0].data = s.hist.bins;
+  histChart.update();
+
+  const csv = await fetchText(BASE + "/pnl.csv");
+  const lines = csv.trim().split(/\r?\n/).slice(1).reverse();
+  const body = document.querySelector('#trades tbody');
+  body.innerHTML = '';
+  lines.slice(0, 25).forEach(l=>{
+    const [ts,symbol,side,price,amount,fee,realized] = l.split(',');
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${(ts||'').replace('T',' ').slice(0,19)}</td><td>${symbol||''}</td><td>${side||''}</td><td>${Number(price||0).toFixed(4)}</td><td>${Number(amount||0).toFixed(6)}</td><td>${Number(realized||0).toFixed(6)}</td><td>${Number(fee||0).toFixed(6)}</td>`;
+    body.appendChild(tr);
+  });
+}
+
+async function refreshDaily(){
+  const d = await fetchJSON(BASE + "/stats/daily");
+  const body = document.querySelector('#daily tbody');
+  body.innerHTML = '';
+  (d.daily || []).slice(-30).forEach(row=>{
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      `<td>${row.key}</td><td>${row.trades}</td><td>${row.wins}</td><td>${row.losses}</td>` +
+      `<td>${row.winRate.toFixed(2)}%</td><td>${row.profitFactor.toFixed(2)}</td>` +
+      `<td>${row.grossProfit.toFixed(4)}</td><td>${row.grossLoss.toFixed(4)}</td><td>${row.net.toFixed(4)}</td>`;
+    body.appendChild(tr);
+  });
+}
+
+refresh();
+refreshDaily();
+setInterval(()=>{ refresh(); refreshDaily(); }, 4000);
+
+// Live SSE feed
+try{
+  const ev = new EventSource(BASE + "/stream");
+  const live = document.getElementById('live');
+  function push(line){
+    const time = new Date().toISOString().slice(11,19);
+    live.textContent += `[${time}] ${line}\n`;
+    live.scrollTop = live.scrollHeight;
+  }
+  ev.addEventListener('hello', (e)=> push('SSE connected'));
+  ev.addEventListener('log',   (e)=> { const d=JSON.parse(e.data); push(d.line); });
+  ev.addEventListener('exec',  (e)=> { const d=JSON.parse(e.data);
+    push(`EXEC ${d.signal} ${d.symbol} lev=${d.lev} notional=${d.notionalUSDT}`); });
+  ev.addEventListener('fill',  (e)=> { const d=JSON.parse(e.data);
+    push(`FILL ${d.symbol} ${d.side} px=${d.price} amt=${d.amount} realized=${d.realized}`); });
+}catch{}
+
+// ===== Simulator & Admin controls =====
+const tokInput = document.getElementById('admintok');
+document.getElementById('saveTok').onclick = () => {
+  localStorage.setItem('dash_token', tokInput.value || '');
+  document.getElementById('simmsg').textContent = 'Token saved';
+  setTimeout(()=> document.getElementById('simmsg').textContent='', 1500);
+};
+tokInput.value = localStorage.getItem('dash_token') || '';
+
+function val(id){ return (document.getElementById(id).value || '').trim(); }
+async function postJSON(path, payload={}, useQuery=false){
+  const token = localStorage.getItem('dash_token') || '';
+  const url = BASE + path + (useQuery ? (`?token=${encodeURIComponent(token)}`) : '');
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type':'application/json', 'X-Dashboard-Token': token },
+    body: JSON.stringify(payload)
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+document.getElementById('btnFill').onclick = async ()=>{
+  try{
+    const realized = prompt('Realized PnL (USDT). Example: 0.42 or -0.25', '0.25');
+    if (realized===null) return;
+    const symbol = val('sym') || 'BTC/USDT:USDT';
+    const r = await postJSON('/admin/simfill', { symbol, realized: Number(realized) });
+    document.getElementById('simmsg').textContent = `SimFill ok: ${r.realized}`;
+    setTimeout(()=> document.getElementById('simmsg').textContent='', 1500);
+  }catch(e){ document.getElementById('simmsg').textContent = 'Error: '+e.message; }
+};
+
+document.getElementById('btnSeq').onclick = async ()=>{
+  try{
+    const symbol = val('sym') || 'BTC/USDT:USDT';
+    const count  = Number(val('count') || 25);
+    const min    = Number(prompt('Min realized (USDT)', '-0.5'));
+    const max    = Number(prompt('Max realized (USDT)', '0.8'));
+    const r = await postJSON(`/admin/simseq?symbol=${encodeURIComponent(symbol)}&count=${count}&min=${min}&max=${max}`, {}, true);
+    document.getElementById('simmsg').textContent = `SimSeq ok: added ${r.added}`;
+    setTimeout(()=> document.getElementById('simmsg').textContent='', 1500);
+  }catch(e){ document.getElementById('simmsg').textContent = 'Error: '+e.message; }
+};
+
+document.getElementById('btnStrat').onclick = async ()=>{
+  try{
+    const payload = {
+      count:   Number(val('count') || 25),
+      winRate: Number(val('winrate') || 0.55),
+      avgWin:  Number(val('avgwin') || 0.3),
+      avgLoss: Number(val('avgloss') || 0.25),
+      symbol:  val('sym') || 'BTC/USDT:USDT',
+      mix:     val('mix') || 'alt',
+      jitter:  Number(val('jitter') || 0.15),
+      minPauseMs: Number(val('pmin') || 0),
+      maxPauseMs: Number(val('pmax') || 0)
+    };
+    const r = await postJSON('/admin/simstrategy', payload);
+    document.getElementById('simmsg').textContent = `SimStrategy ok: ${r.generated}`;
+    setTimeout(()=> document.getElementById('simmsg').textContent='', 1500);
+  }catch(e){ document.getElementById('simmsg').textContent = 'Error: '+e.message; }
+};
+
+document.getElementById('btnStrat2').onclick = async ()=>{
+  try{
+    const payload = {
+      count:   Number(val('count') || 25),
+      winRate: Number(val('winrate') || 0.55),
+      avgWin:  Number(val('avgwin') || 0.3),
+      avgLoss: Number(val('avgloss') || 0.25),
+      notional:Number(val('notional') || 20),
+      symbol:  val('sym') || 'BTC/USDT:USDT',
+      mix:     val('mix') || 'alt',
+      jitter:  Number(val('jitter') || 0.15),
+      feeRate: Number(val('feerate') || 0),
+      minPauseMs: Number(val('pmin') || 0),
+      maxPauseMs: Number(val('pmax') || 0)
+    };
+    const r = await postJSON('/admin/simstrategy2', payload);
+    document.getElementById('simmsg').textContent = `SimStrategy2 ok: ${r.generated}`;
+    setTimeout(()=> document.getElementById('simmsg').textContent='', 1500);
+  }catch(e){ document.getElementById('simmsg').textContent = 'Error: '+e.message; }
+};
+
+document.getElementById('btnReset').onclick = async ()=>{
+  try{
+    if (!confirm('Reset all simulated stats (fills, equity, streaks, daily)?')) return;
+    const token = localStorage.getItem('dash_token') || '';
+    const res = await fetch(BASE + '/admin/reset', {
+      method: 'POST',
+      headers: { 'X-Dashboard-Token': token }
+    });
+    if (!res.ok) throw new Error(await res.text());
+    document.getElementById('simmsg').textContent = 'Reset complete';
+    setTimeout(()=> document.getElementById('simmsg').textContent='', 1500);
+  }catch(e){
+    document.getElementById('simmsg').textContent = 'Error: ' + e.message;
+  }
+};
+
+async function postAdmin(path, body={}) {
+  const token = localStorage.getItem('dash_token') || '';
+  const res = await fetch(BASE + path, {
+    method:'POST',
+    headers:{ 'Content-Type':'application/json', 'X-Dashboard-Token': token },
+    body: JSON.stringify(body)
+  });
+  if(!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+document.getElementById('btnHalt').onclick = async ()=>{
+  try{
+    const symbol = (document.getElementById('sym').value || 'BTC/USDT:USDT').trim().toUpperCase();
+    await postAdmin('/admin/halt', { symbol });
+    document.getElementById('simmsg').textContent = `Halted ${symbol}`;
+    setTimeout(()=> document.getElementById('simmsg').textContent='', 1500);
+  }catch(e){ document.getElementById('simmsg').textContent = 'Error: '+e.message; }
+};
+document.getElementById('btnUnhalt').onclick = async ()=>{
+  try{
+    const symbol = (document.getElementById('sym').value || 'BTC/USDT:USDT').trim().toUpperCase();
+    await postAdmin('/admin/unhalt', { symbol });
+    document.getElementById('simmsg').textContent = `Unhalted ${symbol}`;
+    setTimeout(()=> document.getElementById('simmsg').textContent='', 1500);
+  }catch(e){ document.getElementById('simmsg').textContent = 'Error: '+e.message; }
+};
+document.getElementById('btnCooldown').onclick = async ()=>{
+  try{
+    const symbol = (document.getElementById('sym').value || 'BTC/USDT:USDT').trim().toUpperCase();
+    const seconds = Math.max(1, Number(document.getElementById('cdsecs').value || 60));
+    await postAdmin('/admin/cooldown', { symbol, seconds });
+    document.getElementById('simmsg').textContent = `Cooldown ${symbol} for ${seconds}s`;
+    setTimeout(()=> document.getElementById('simmsg').textContent='', 1500);
+  }catch(e){ document.getElementById('simmsg').textContent = 'Error: '+e.message; }
+};
+document.getElementById('btnHaltAll').onclick = async ()=>{
+  try{
+    const token = localStorage.getItem('dash_token') || '';
+    const res = await fetch(BASE + '/admin/halt_all', { method:'POST', headers:{ 'X-Dashboard-Token': token } });
+    if (!res.ok) throw new Error(await res.text());
+    document.getElementById('simmsg').textContent = 'MASTER HALT enabled';
+    setTimeout(()=> document.getElementById('simmsg').textContent='', 1500);
+  }catch(e){ document.getElementById('simmsg').textContent = 'Error: '+e.message; }
+};
+document.getElementById('btnUnhaltAll').onclick = async ()=>{
+  try{
+    const token = localStorage.getItem('dash_token') || '';
+    const res = await fetch(BASE + '/admin/unhalt_all', { method:'POST', headers:{ 'X-Dashboard-Token': token } });
+    if (!res.ok) throw new Error(await res.text());
+    document.getElementById('simmsg').textContent = 'MASTER HALT disabled';
+    setTimeout(()=> document.getElementById('simmsg').textContent='', 1500);
+  }catch(e){ document.getElementById('simmsg').textContent = 'Error: '+e.message; }
+};
+</script>
+</body>
+</html>
