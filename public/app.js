@@ -1,212 +1,172 @@
-<script>
-// ==== CONFIG ====
-const BASE = "https://mexc-scalper-production.up.railway.app";
 
-// token persistence
-function getToken() { return localStorage.getItem("dash_token") || ""; }
-function setToken(t){ localStorage.setItem("dash_token", t||""); }
+const BASE = location.origin;  // same origin as server
+document.getElementById('pnlcsv').href  = BASE + "/pnl.csv";
+document.getElementById('logscsv').href = BASE + "/logs.csv";
+document.getElementById('config').href  = BASE + "/config";
 
-// common fetch with token
-async function jget(path){
-  const r = await fetch(`${BASE}${path}`, {
-    headers: { "X-Dashboard-Token": getToken() }
-  });
-  if(!r.ok) throw new Error(`${path} ${r.status}`);
-  return r.json();
-}
-async function textget(path){
-  const r = await fetch(`${BASE}${path}`, {
-    headers: { "X-Dashboard-Token": getToken() }
-  });
-  if(!r.ok) throw new Error(`${path} ${r.status}`);
-  return r.text();
-}
-async function jpost(path, body){
-  const r = await fetch(`${BASE}${path}`, {
-    method: "POST",
-    headers: {
-      "Content-Type":"application/json",
-      "X-Dashboard-Token": getToken()
-    },
-    body: JSON.stringify(body||{})
-  });
-  if(!r.ok) throw new Error(`${path} ${r.status}`);
-  return r.json();
-}
+const kDefs = [
+  { id:"trades", label:"Trades" },
+  { id:"winrate", label:"Win Rate" },
+  { id:"net", label:"Net PnL (USDT)" },
+  { id:"gprofit", label:"Gross Profit" },
+  { id:"gloss", label:"Gross Loss" },
+  { id:"pf", label:"Profit Factor" },
+  { id:"avgwin", label:"Avg Win" },
+  { id:"avgloss", label:"Avg Loss" },
+  { id:"dd", label:"Max Drawdown" }
+];
 
-// DOM helpers
-const $ = s => document.querySelector(s);
-const $$ = s => Array.from(document.querySelectorAll(s));
+function el(html){ const d=document.createElement('div'); d.innerHTML=html.trim(); return d.firstChild; }
+const kpiWrap = document.getElementById('kpis');
+kDefs.forEach(k => kpiWrap.appendChild(el(`<div class="kpi"><div>${k.label}</div><div class="v" id="${k.id}">—</div></div>`)));
 
-function fmt(n, d=2){ return Number(n||0).toFixed(d); }
-function nowISO(){ return new Date().toISOString().replace('T',' ').slice(0,19); }
-
-// ==== KPI update ====
-async function loadStats(){
-  try{
-    const s = await jget("/stats");
-    $("#k-trades-today").textContent = s.tradesToday;
-    $("#k-trades-hour").textContent  = s.tradesLastHour;
-    $("#k-pnl-today").textContent    = fmt(s.pnlToday, 4);
-    $("#k-dry").textContent          = String(s.dry).toUpperCase();
-    $("#k-daily-key").textContent    = s.dailyKey || "-";
-
-    // cooldown + halted badges
-    const cd = Object.entries(s.cooldown||{});
-    $("#cooldowns").innerHTML = cd.length
-      ? cd.map(([sym,sec])=>`<span class="pill warn">${sym}: ${sec}s</span>`).join(" ")
-      : `<span class="muted">none</span>`;
-
-    const halted = Object.entries(s.halted||{});
-    $("#halted").innerHTML = halted.length
-      ? halted.map(([sym,val])=>`<span class="pill danger">${sym}: ${val}</span>`).join(" ")
-      : `<span class="muted">none</span>`;
-
-  }catch(e){
-    console.error(e);
-  }
-}
-
-async function loadDaily(){
-  try{
-    const d = await jget("/stats/daily");
-    // equity line
-    const labels = d.map(x=>x.day);
-    const eq     = d.map(x=>x.equity);
-    drawLine("#equityChart", labels, eq, "Equity");
-
-    // wins / losses bar
-    const wins = d.map(x=>x.wins||0);
-    const losses = d.map(x=>x.losses||0);
-    drawBars("#wlChart", labels, [ {label:"Wins", data:wins}, {label:"Losses", data:losses} ]);
-  }catch(e){ console.error(e); }
-}
-
-async function loadPNL(){
-  try{
-    const csv = await textget("/pnl.csv");
-    $("#pnlpre").textContent = csv;
-    // simple tail parse for last 20 rows
-    const rows = csv.trim().split(/\n/).slice(1).slice(-20).map(r=>r.split(","));
-    $("#pnltable tbody").innerHTML = rows.map(r=>`
-      <tr>
-        <td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td>
-        <td class="num">${fmt(r[3])}</td><td class="num">${fmt(r[4])}</td>
-        <td class="num">${fmt(r[5],6)}</td><td class="num ${Number(r[6])>=0?'pos':'neg'}">${fmt(r[6],6)}</td>
-      </tr>`).join("");
-  }catch(e){ console.error(e); }
-}
-
-async function loadLogs(){
-  try{
-    const csv = await textget("/logs.csv");
-    $("#logpre").textContent = csv;
-  }catch(e){ console.error(e); }
-}
-
-// ==== Charts (Chart.js via CDN) ====
-const charts = {};
-function drawLine(sel, labels, data, label){
-  const ctx = document.querySelector(sel);
-  charts[sel]?.destroy?.();
-  charts[sel] = new Chart(ctx, {
-    type:"line",
-    data:{ labels, datasets:[{ label, data}]},
-    options:{ responsive:true, maintainAspectRatio:false }
-  });
-}
-function drawBars(sel, labels, datasets){
-  const ctx = document.querySelector(sel);
-  charts[sel]?.destroy?.();
-  charts[sel] = new Chart(ctx, {
-    type:"bar",
-    data:{ labels, datasets },
-    options:{ responsive:true, maintainAspectRatio:false, grouped:true }
-  });
-}
-
-// ==== SSE stream ====
-let es=null;
-function startStream(){
-  stopStream();
-  const u = new URL(`${BASE}/stream`);
-  u.searchParams.set("token", getToken());
-  es = new EventSource(u.toString());
-  es.onmessage = (ev)=>{
-    const obj = safeJSON(ev.data);
-    const line = `[${nowISO()}] ${ev.data}`;
-    const pre = $("#live");
-    pre.textContent += line + "\n";
-    pre.scrollTop = pre.scrollHeight;
-    // light refresh on certain events
-    if(obj && (obj.type==="fill" || obj.type==="exec" || obj.type==="auto-close")){
-      loadStats(); loadPNL();
-    }
-  };
-  es.onerror = ()=>{/* keep alive */};
-}
-function stopStream(){
-  if(es){ es.close(); es=null; }
-}
-function safeJSON(s){ try{ return JSON.parse(s); }catch{ return null; } }
-
-// ==== Admin & Sim ====
-async function simFill(){
-  const sym = $("#sym").value || "BTC/USDT:USDT";
-  const side= $("#simSide").value || "buy";
-  const px  = Number($("#simPx").value || 19000);
-  const amt = Number($("#simAmt").value || 0.001);
-  await jpost("/admin/simfill", { symbol:sym, side, price:px, amount:amt, fee:0 });
-  await loadStats(); await loadPNL();
-}
-async function simSeq(which){
-  const sym = $("#sym").value || "BTC/USDT:USDT";
-  const ok = await jpost("/admin/"+which, { symbol:sym });
-  $("#msg").textContent = JSON.stringify(ok);
-  await loadStats(); await loadPNL();
-}
-async function cooldown(){
-  const sym = $("#sym").value || "BTC/USDT:USDT";
-  const sec = Number($("#cdSec").value||120);
-  await jpost("/admin/cooldown", { symbol:sym, seconds:sec });
-  await loadStats();
-}
-async function halt(){ const sym = $("#sym").value || "BTC/USDT:USDT"; await jpost("/admin/halt", { symbol:sym }); await loadStats(); }
-async function unhalt(){ const sym = $("#sym").value || "BTC/USDT:USDT"; await jpost("/admin/unhalt", { symbol:sym }); await loadStats(); }
-async function haltAll(){ await jpost("/admin/halt_all", {}); await loadStats(); }
-async function unhaltAll(){ await jpost("/admin/unhalt_all", {}); await loadStats(); }
-async function resetAll(){ await jpost("/admin/reset", {}); await loadStats(); await loadPNL(); }
-
-// token input
-function bindToken(){
-  const inp=$("#token");
-  inp.value = getToken();
-  $("#saveToken").onclick = ()=>{
-    setToken(inp.value.trim());
-    $("#msg").textContent = "Token saved.";
-    // reconnect stream with new token
-    startStream();
-    loadStats(); loadDaily(); loadPNL(); loadLogs();
-  };
-}
-
-// init
-window.addEventListener("DOMContentLoaded", ()=>{
-  bindToken();
-  $("#reload").onclick = ()=>{ loadStats(); loadDaily(); loadPNL(); loadLogs(); };
-  $("#simFill").onclick = simFill;
-  $("#simImpulse").onclick = ()=>simSeq("simseq");
-  $("#simStrat1").onclick = ()=>simSeq("simstrategy");
-  $("#simStrat2").onclick = ()=>simSeq("simstrategy2");
-  $("#cooldownBtn").onclick = cooldown;
-  $("#haltBtn").onclick = halt;
-  $("#unhaltBtn").onclick = unhalt;
-  $("#haltAllBtn").onclick = haltAll;
-  $("#unhaltAllBtn").onclick = unhaltAll;
-  $("#resetBtn").onclick = resetAll;
-
-  // first load
-  loadStats(); loadDaily(); loadPNL(); loadLogs();
-  startStream();
+const eqChart = new Chart(document.getElementById('eq'), {
+  type:'line',
+  data:{ labels:[], datasets:[{ label:'Equity (USDT)', data:[], tension:0.2 }]},
+  options:{ animation:false, plugins:{legend:{display:false}}, scales:{x:{ticks:{autoSkip:true,maxRotation:0}}} 
 });
-</script>
+const ddChart = new Chart(document.getElementById('dd'), {
+  type:'line',
+  data:{ labels:[], datasets:[{ label:'Drawdown (USDT)', data:[], tension:0.2 }]},
+  options:{ animation:false, plugins:{legend:{display:false}}, scales:{x:{ticks:{autoSkip:true,maxRotation:0}}} 
+});
+const histChart = new Chart(document.getElementById('hist'), {
+  type:'bar',
+  data:{ labels:[], datasets:[{ label:'Trades', data:[] }]},
+  options:{ animation:false, plugins:{legend:{display:false}} }
+});
+
+async function fetchJSON(u){ const r=await fetch(u,{cache:'no-store'}); if(!r.ok) throw new Error(r.status); return r.json(); }
+async function fetchText(u){ const r=await fetch(u,{cache:'no-store'}); if(!r.ok) throw new Error(r.status); return r.text(); }
+
+async function refresh(){
+  try{
+    const health = await fetchJSON(BASE + "/health");
+    document.getElementById('drypill').textContent = "DRY: " + String(health.dry);
+
+    const mp = document.getElementById('masterpill');
+    if (health.globalHalt) { mp.textContent='MASTER: HALTED'; mp.style.background='#8b1a1a'; mp.style.color='#ffd7d7'; }
+    else { mp.textContent='MASTER: LIVE'; mp.style.background=''; mp.style.color=''; }
+
+    const sym = (document.getElementById('sym').value || 'BTC/USDT:USDT').trim().toUpperCase();
+    const halted = health.halted && Object.prototype.hasOwnProperty.call(health.halted, sym);
+    const pill = document.getElementById('haltpill');
+    if (health.globalHalt || halted) { pill.textContent='HALTED'; pill.style.background='#5a1a1a'; pill.style.color='#ffd7d7'; }
+    else { pill.textContent='LIVE'; pill.style.background=''; pill.style.color=''; }
+  } catch {}
+
+  const s = await fetchJSON(BASE + "/stats");
+  document.getElementById('trades').textContent  = s.counts.trades;
+  document.getElementById('winrate').textContent = s.quality.winRate.toFixed(2) + "%";
+  document.getElementById('net').textContent     = s.pnl.net.toFixed(4);
+  document.getElementById('gprofit').textContent = s.pnl.grossProfit.toFixed(4);
+  document.getElementById('gloss').textContent   = s.pnl.grossLoss.toFixed(4);
+  document.getElementById('pf').textContent      = s.quality.profitFactor.toFixed(3);
+  document.getElementById('avgwin').textContent  = s.quality.avgWin.toFixed(4);
+  document.getElementById('avgloss').textContent = s.quality.avgLoss.toFixed(4);
+  document.getElementById('dd').textContent      = s.risk.maxDrawdown.toFixed(4);
+  document.getElementById('ddval').textContent   = s.risk.maxDrawdown.toFixed(4);
+
+  document.getElementById('cwin').textContent  = s.streaks.currentWins;
+  document.getElementById('closs').textContent = s.streaks.currentLosses;
+  document.getElementById('mwin').textContent  = s.streaks.maxWins;
+  document.getElementById('mloss').textContent = s.streaks.maxLosses;
+
+  const eqLabels = s.equity.map(p => new Date(p.ts).toISOString().slice(11,19));
+  eqChart.data.labels = eqLabels;
+  eqChart.data.datasets[0].data = s.equity.map(p => p.equity);
+  eqChart.update();
+
+  const ddLabels = s.drawdown.map(p => new Date(p.ts).toISOString().slice(11,19));
+  ddChart.data.labels = ddLabels;
+  ddChart.data.datasets[0].data = s.drawdown.map(p => p.dd);
+  ddChart.update();
+
+  histChart.data.labels = s.hist.labels;
+  histChart.data.datasets[0].data = s.hist.bins;
+  histChart.update();
+
+  const csv = await fetchText(BASE + "/pnl.csv");
+  const lines = csv.trim().split(/\r?\n/).slice(1).reverse();
+  const body = document.querySelector('#trades tbody');
+  body.innerHTML = '';
+  lines.slice(0, 25).forEach(l=>{
+    const [ts,symbol,side,price,amount,fee,realized] = l.split(',');
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${(ts||'').replace('T',' ').slice(0,19)}</td><td>${symbol||''}</td><td>${side||''}</td><td>${Number(price||0).toFixed(4)}</td><td>${Number(amount||0).toFixed(6)}</td><td>${Number(realized||0).toFixed(6)}</td><td>${Number(fee||0).toFixed(6)}</td>`;
+    body.appendChild(tr);
+  });
+}
+
+async function refreshDaily(){
+  const d = await fetchJSON(BASE + "/stats/daily");
+  const body = document.querySelector('#daily tbody');
+  body.innerHTML = '';
+  (d.daily || []).slice(-30).forEach(row=>{
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${row.key}</td><td>${row.trades}</td><td>${row.wins}</td><td>${row.losses}</td>` +
+                   `<td>${row.winRate.toFixed(2)}%</td><td>${row.profitFactor.toFixed(2)}</td>` +
+                   `<td>${row.grossProfit.toFixed(4)}</td><td>${row.grossLoss.toFixed(4)}</td><td>${row.net.toFixed(4)}</td>`;
+    body.appendChild(tr);
+  });
+}
+
+refresh();
+refreshDaily();
+setInterval(()=>{ refresh(); refreshDaily(); }, 4000);
+
+// Live SSE feed
+try{
+  const ev = new EventSource(BASE + "/stream");
+  const live = document.getElementById('live');
+  function push(line){
+    const time = new Date().toISOString().slice(11,19);
+    live.textContent += `[${time}] ${line}\n`;
+    live.scrollTop = live.scrollHeight;
+  }
+  ev.addEventListener('hello', (e)=> push('SSE connected'));
+  ev.addEventListener('log',   (e)=> { const d=JSON.parse(e.data); push(d.line); });
+  ev.addEventListener('exec',  (e)=> { const d=JSON.parse(e.data); push(`EXEC ${d.signal} ${d.symbol} lev=${d.lev} notional=${d.notionalUSDT}`); });
+  ev.addEventListener('fill',  (e)=> { const d=JSON.parse(e.data); push(`FILL ${d.symbol} ${d.side} px=${d.price} amt=${d.amount} realized=${d.realized}`); });
+}catch{}
+
+// ---- Admin posts (real)
+const tokInput = document.getElementById('admintok');
+document.getElementById('saveTok').onclick = () => {
+  localStorage.setItem('dash_token', tokInput.value || '');
+  document.getElementById('simmsg').textContent = 'Token saved';
+  setTimeout(()=> document.getElementById('simmsg').textContent='', 1500);
+};
+tokInput.value = localStorage.getItem('dash_token') || '';
+
+function val(id){ return (document.getElementById(id).value || '').trim(); }
+async function postAdmin(path, body={}) {
+  const token = localStorage.getItem('dash_token') || '';
+  const res = await fetch(BASE + path, {
+    method:'POST',
+    headers:{ 'Content-Type':'application/json', 'X-Dashboard-Token': token },
+    body: JSON.stringify(body)
+  });
+  if(!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+document.getElementById('btnHalt').onclick = async ()=>{
+  try{ const symbol = (val('sym') || 'BTC/USDT:USDT').toUpperCase(); await postAdmin('/admin/halt', { symbol }); document.getElementById('simmsg').textContent = `Halted ${symbol}`; setTimeout(()=> document.getElementById('simmsg').textContent='', 1500); }
+  catch(e){ document.getElementById('simmsg').textContent = 'Error: '+e.message; }
+};
+document.getElementById('btnUnhalt').onclick = async ()=>{
+  try{ const symbol = (val('sym') || 'BTC/USDT:USDT').toUpperCase(); await postAdmin('/admin/unhalt', { symbol }); document.getElementById('simmsg').textContent = `Unhalted ${symbol}`; setTimeout(()=> document.getElementById('simmsg').textContent='', 1500); }
+  catch(e){ document.getElementById('simmsg').textContent = 'Error: '+e.message; }
+};
+document.getElementById('btnCooldown').onclick = async ()=>{
+  try{ const symbol = (val('sym') || 'BTC/USDT:USDT').toUpperCase(); const seconds = Math.max(1, Number(val('cdsecs') || 60)); await postAdmin('/admin/cooldown', { symbol, seconds }); document.getElementById('simmsg').textContent = `Cooldown ${symbol} for ${seconds}s`; setTimeout(()=> document.getElementById('simmsg').textContent='', 1500); }
+  catch(e){ document.getElementById('simmsg').textContent = 'Error: '+e.message; }
+};
+document.getElementById('btnHaltAll').onclick = async ()=>{
+  try{ await postAdmin('/admin/halt_all', {}); document.getElementById('simmsg').textContent = 'MASTER HALT enabled'; setTimeout(()=> document.getElementById('simmsg').textContent='', 1500); }
+  catch(e){ document.getElementById('simmsg').textContent = 'Error: '+e.message; }
+};
+document.getElementById('btnUnhaltAll').onclick = async ()=>{
+  try{ await postAdmin('/admin/unhalt_all', {}); document.getElementById('simmsg').textContent = 'MASTER HALT disabled'; setTimeout(()=> document.getElementById('simmsg').textContent='', 1500); }
+  catch(e){ document.getElementById('simmsg').textContent = 'Error: '+e.message; }
+};

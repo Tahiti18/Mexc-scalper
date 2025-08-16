@@ -1,6 +1,21 @@
-body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;background:#0b1220;color:#eaf0ff;margin:0}
-h1{margin:16px 16px 0 16px;color:#1a73e8}
-.card{background:#121a2b;border:1px solid #1a2238;border-radius:10px;margin:16px;padding:12px}
-.pill{display:inline-block;background:#1f2b45;color:#8fa1c7;padding:6px 10px;border-radius:999px;margin-right:8px;font-size:12px;text-decoration:none}
-pre{white-space:pre-wrap;word-break:break-word}
-a{color:#9fc5ff}
+
+:root { --bg:#0b1220; --fg:#eaf0ff; --mut:#8fa1c7; --card:#121a2b; --pill:#1f2b45; --accent:#1a73e8; }
+body { margin:0; font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; color:var(--fg); background:var(--bg);}
+header { padding:16px 20px; border-bottom:1px solid #1a2238; display:flex; align-items:center; gap:14px;}
+h1 { margin:0; font-size:20px; color:var(--accent);}
+.pill {background:var(--pill); padding:6px 10px; border-radius:999px; color:var(--mut); font-size:12px;}
+a.link { color:#9fc5ff; text-decoration:none; } a.link:hover{ text-decoration:underline; }
+.wrap { padding:18px; display:grid; grid-template-columns: 1.3fr 1fr; gap:18px;}
+.card { background:var(--card); border:1px solid #1a2238; border-radius:10px; padding:14px;}
+h2 { margin:0 0 10px; font-size:16px; color:#cfe1ff;}
+.grid { display:grid; grid-template-columns: repeat(3,1fr); gap:10px;}
+.kpi { background:#0e1526; border:1px solid #1a2238; border-radius:8px; padding:10px;}
+.kpi .v { font-size:18px; margin-top:4px;}
+table { width:100%; border-collapse:collapse; font-size:12px;}
+td,th { padding:6px 8px; border-bottom:1px solid #1a2238; color:#cfe1ff; text-align:left;}
+.logs { max-height:240px; overflow:auto; font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, mono; font-size:12px; background:#0e1526; border:1px solid #1a2238; border-radius:8px; padding:10px;}
+.smallgrid { display:grid; grid-template-columns: repeat(2,1fr); gap:10px; }
+.streak { background:#0e1526; border:1px solid #1a2238; border-radius:8px; padding:10px; }
+.row { display:flex; gap:10px; align-items:center; }
+input, select, button { background:#0e1526; color:#eaf0ff; border:1px solid #1a2238; border-radius:6px; padding:6px 8px; }
+button { cursor:pointer; }
