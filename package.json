@@ -1,16 +1,17 @@
 {
-  "name": "mexc-relay-advanced",
-  "version": "2.0.0",
+  "name": "mexc-scalper-relay-advanced",
+  "version": "3.2.0",
   "private": true,
   "type": "module",
-  "main": "server.js",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "ccxt": "^4.3.87",
+    "ccxt": "^4.3.67",
     "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "node-telegram-bot-api": "^0.66.0"
+    "express": "^4.19.2"
   }
 }

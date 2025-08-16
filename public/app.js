@@ -1,8 +1,13 @@
-
-async function loadHealth(){
-  const r = await fetch('/health',{cache:'no-store'});
-  const j = await r.json();
-  document.getElementById('h').textContent = JSON.stringify(j,null,2);
-}
-setInterval(loadHealth, 3000);
-loadHealth();
+(async()=>{
+  const h=document.getElementById('h');
+  async function refresh(){
+    try{
+      const r=await fetch('/health'); const j=await r.json();
+      h.textContent=JSON.stringify(j,null,2);
+    }catch(e){
+      h.textContent=String(e);
+    }
+  }
+  refresh();
+  setInterval(refresh, 3000);
+})();
