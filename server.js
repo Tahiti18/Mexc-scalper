@@ -6,22 +6,22 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 /**
- * MEXC Scalper Relay — Advanced (NO SIMULATOR)
+ * MEXC Scalper Relay — Advanced
  * - Webhook receiver for TradingView alerts (/webhook)
  * - Guards: rate-limit per hour, spread limit, per-symbol cooldown, loss-streak halt
  * - Auto-close (optional) via relayTimer + autoCloseSec
- * - SSE live stream (/stream) for dashboard
+ * - SSE live stream (/stream) for dashboard  (events: hello, log, exec, fill)
  * - CSV exports: /pnl.csv , /logs.csv
  * - JSON APIs: /stats , /stats/daily , /fills , /logs
- * - Admin endpoints (real): /admin/halt, /admin/unhalt, /admin/cooldown, /admin/halt_all, /admin/unhalt_all, /admin/reset, /admin/toggle_dry
- * - Background fill sync with CCXT (fetchMyTrades) every 15s
- * - DRY_RUN mode prevents any live order placements
- * - Optimizer: /optimizer/suggest → OpenRouter (GPT-5)
+ * - Admin: /admin/halt, /admin/unhalt, /admin/cooldown, /admin/halt_all, /admin/unhalt_all, /admin/reset, /admin/toggle_dry
+ * - Background fill sync with CCXT (live fills) every 15s
+ * - DRY_RUN (Paper Mode) now SIMULATES fills so the dashboard shows results
+ * - Optimizer: /optimizer/suggest (OpenRouter)
  */
 
 const app = express();
 
-// Capture raw body for optional HMAC verification
+// ---- raw body capture (for HMAC)
 let rawBody = Buffer.alloc(0);
 app.use((req, res, next) => {
   const chunks = [];
@@ -34,16 +34,15 @@ app.use((req, res, next) => {
   });
 });
 
-// Helper to read env with default
 const E = (k, d = null) => process.env[k] ?? d;
 
 // ---- Core env
 const PORT = Number(E('PORT', 8080));
-let DRY  = String(E('DRY_RUN', 'true')).toLowerCase() === 'true'; // CHANGED: let (toggle at runtime)
+let DRY  = String(E('DRY_RUN', 'true')).toLowerCase() === 'true';  // togglable at runtime
 const SECRET = E('WEBHOOK_SECRET', '');
 const DASHBOARD_TOKEN = E('DASHBOARD_TOKEN', '');
 
-// Defaults
+// Defaults (you can override via env)
 const DEFAULT_SYMBOL   = E('DEFAULT_SYMBOL', 'SOL/USDT:USDT').toUpperCase();
 const DEFAULT_NOTIONAL = Number(E('DEFAULT_NOTIONAL_USDT', 20));
 const DEFAULT_LEVERAGE = Number(E('DEFAULT_LEVERAGE', 100));
@@ -55,22 +54,25 @@ const MAX_SPREAD_PCT        = Number(E('MAX_SPREAD_PCT', 0.03));
 const REJECT_IF_THIN_BOOK   = String(E('REJECT_IF_THIN_BOOK','true')).toLowerCase()==='true';
 const COOLDOWN_AFTER_LOSS_SEC = Number(E('COOLDOWN_AFTER_LOSS_SEC', 120));
 
-// Loss-streak handling
-const MAX_CONSEC_LOSSES     = Number(E('MAX_CONSEC_LOSSES', 3));
-const LOSS_HALT_COOLDOWN_MIN= Number(E('LOSS_HALT_COOLDOWN_MIN', 10));
-const LOSS_REDUCE_FACTORS   = (()=> { try { return JSON.parse(E('LOSS_REDUCE_FACTORS','[1.0,0.7,0.4]')); } catch { return [1.0,0.7,0.4]; } })();
-const LOSS_MIN_NOTIONAL     = Number(E('LOSS_MIN_NOTIONAL', 5));
+// Loss streak
+const MAX_CONSEC_LOSSES      = Number(E('MAX_CONSEC_LOSSES', 3));
+const LOSS_HALT_COOLDOWN_MIN = Number(E('LOSS_HALT_COOLDOWN_MIN', 10));
+const LOSS_REDUCE_FACTORS    = (()=> { try { return JSON.parse(E('LOSS_REDUCE_FACTORS','[1.0,0.7,0.4]')); } catch { return [1.0,0.7,0.4]; } })();
+const LOSS_MIN_NOTIONAL      = Number(E('LOSS_MIN_NOTIONAL', 5));
 
-// Daily reset
+// Daily
 const DAILY_PNL_CAP_USDT    = Number(E('DAILY_PNL_CAP_USDT', 0));
 const DAILY_RESET_HOUR_UTC  = Number(E('DAILY_RESET_HOUR_UTC', 0));
 
-// Optional HMAC for extra verification
+// Paper mode fee (applied to simulated fills; in % of notional)
+const PAPER_FEE_PCT = Number(E('PAPER_FEE_PCT', 0.06)); // 0.06% typical taker
+
+// Optional HMAC
 const HMAC_ENABLED = String(E('HMAC_ENABLED','false')).toLowerCase()==='true';
 const HMAC_SECRET  = E('HMAC_SECRET','');
 const HMAC_HEADER  = E('HMAC_HEADER','X-Signature');
 
-// CORS for Netlify/other dashboard origins (default allow all)
+// CORS
 const NETLIFY_ORIGIN = E('NETLIFY_ORIGIN','*');
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', NETLIFY_ORIGIN);
@@ -90,23 +92,21 @@ const mexc = new ccxt.mexc({
 
 // ---- Optimizer (OpenRouter)
 const OPENROUTER_API_KEY = E('OPENROUTER_API_KEY', '');
-const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
+const OPENROUTER_URL   = 'https://openrouter.ai/api/v1/chat/completions';
 const OPENROUTER_MODEL = E('OPENROUTER_MODEL', 'openrouter/auto');
 
 // ---- State
 const now = () => Date.now();
-const tradeTimes = [];             // timestamps (ms) of executions for hourly rate-limit
+const tradeTimes = [];
 const cooldownUntil = new Map();   // symbol -> ts(ms)
 const lossStreak    = new Map();   // symbol -> count
 const haltedUntil   = new Map();   // symbol -> 0 (manual) | ts(ms)
 const lastSpread    = new Map();   // symbol -> pct
-const fills         = [];          // trade fills (realized pnl tracked)
-const events        = [];          // text logs for /logs.csv and SSE stream
-const daily = { key: '', pnl: 0, trades: 0 };
+const fills         = [];          // fill rows for dashboard/CSV
+const events        = [];          // text logs
+const daily         = { key: '', pnl: 0, trades: 0 };
 
-// Inventory for realized pnl calc from executed fills
-const inv = new Map(); // symbol -> { pos, avg }
-
+const inv = new Map();  // inventory for realized PnL: symbol -> { pos, avg }
 let GLOBAL_HALT = false;
 
 // ---- SSE
@@ -116,12 +116,11 @@ function sseEmit(type, payload) {
   for (const c of sseClients) { try { c.res.write(msg); } catch {} }
 }
 
-// ---- Utilities
+// ---- Utils
 function log(s) {
   const e = `[${new Date().toISOString()}] ${s}`;
   events.push(e);
   if (events.length > 2000) events.splice(0, events.length - 2000);
-  // NEW: push every log to SSE live feed
   try { sseEmit('log', { ts: Date.now(), line: s }); } catch {}
 }
 
@@ -210,10 +209,10 @@ function reducedNotional(sym, base) {
 }
 
 // Mark a fill and compute realized pnl against inventory
-function markFill(sym, side, price, amount, fee) {
+function markFill(sym, side, price, amount, feeUSDT) {
   if (!inv.has(sym)) inv.set(sym, { pos:0, avg:0 });
   const st = inv.get(sym);
-  let realized = -(fee || 0);
+  let realized = -(feeUSDT || 0);
   const signed = (side === 'buy' ? 1 : -1) * amount;
 
   // Same direction -> average
@@ -226,8 +225,8 @@ function markFill(sym, side, price, amount, fee) {
       st.avg = newAbs ? (notOld + notAdd) / newAbs : 0;
       st.pos = newPos;
       inv.set(sym, st);
-      fills.push({ ts: now(), symbol: sym, side, price, amount, fee, realized });
-      sseEmit('fill', { ts: now(), symbol: sym, side, price, amount, fee, realized });
+      fills.push({ ts: now(), symbol: sym, side, price, amount, fee: feeUSDT, realized });
+      sseEmit('fill', { ts: now(), symbol: sym, side, price, amount, fee: feeUSDT, realized });
       return realized;
     }
   }
@@ -255,7 +254,7 @@ function markFill(sym, side, price, amount, fee) {
     inv.set(sym, st);
   }
 
-  fills.push({ ts: now(), symbol: sym, side, price, amount, fee, realized });
+  fills.push({ ts: now(), symbol: sym, side, price, amount, fee: feeUSDT, realized });
   daily.pnl += realized;
 
   if (realized < 0) {
@@ -269,7 +268,7 @@ function markFill(sym, side, price, amount, fee) {
   }
 
   if (fills.length > 5000) fills.splice(0, fills.length - 5000);
-  sseEmit('fill', { ts: now(), symbol: sym, side, price, amount, fee, realized });
+  sseEmit('fill', { ts: now(), symbol: sym, side, price, amount, fee: feeUSDT, realized });
 }
 
 // ---- Static
@@ -346,18 +345,12 @@ app.get('/pnl.csv', (req,res)=>{
 app.get('/logs.csv', (req,res)=>{
   res.set('content-type','text/csv; charset=utf-8');
   res.write('ts_iso,event\n');
-  // FIXED: proper regex (no stray backslashes)
   for (const e of events) res.write(`${e.slice(1,25)},${e.replace(/^[^\]]+\]\s*/,'').replace(/,/g,';')}\n`);
   res.end();
 });
 
-// JSON endpoints your frontend will hit
-app.get('/fills', (req, res) => {
-  res.json({ ok:true, fills });
-});
-app.get('/logs', (req, res) => {
-  res.json({ ok:true, logs: events.slice(-500) });
-});
+app.get('/fills', (req, res) => res.json({ ok:true, fills }));
+app.get('/logs',  (req, res) => res.json({ ok:true, logs: events.slice(-500) }));
 
 app.get('/stats', (req, res) => {
   const rows = fills.map(f => ({
@@ -370,8 +363,7 @@ app.get('/stats', (req, res) => {
     amount: Number(f.amount || 0)
   })).sort((a,b)=>a.ts-b.ts);
 
-  let equity = [];
-  let cum = 0;
+  let equity = [], cum = 0;
   for (const r of rows) { cum += r.realized; equity.push({ ts: r.ts, equity: Number(cum.toFixed(8)) }); }
 
   let peak = -Infinity, ddSeries = [], maxDD = 0;
@@ -415,11 +407,7 @@ app.get('/stats', (req, res) => {
     dry: DRY,
     dailyKey: daily.key,
     counts: { trades: rows.length, wins: wins.length, losses: losses.length },
-    pnl: {
-      grossProfit: Number(grossProfit.toFixed(6)),
-      grossLoss:   Number(grossLoss.toFixed(6)),
-      net:         netPnl
-    },
+    pnl: { grossProfit: Number(grossProfit.toFixed(6)), grossLoss: Number(grossLoss.toFixed(6)), net: netPnl },
     quality: {
       winRate: Number((winRate*100).toFixed(2)),
       avgWin: Number(avgWin.toFixed(6)),
@@ -446,7 +434,7 @@ app.get('/stats/daily', (req, res) => {
     const ref = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), DAILY_RESET_HOUR_UTC, 0, 0, 0));
     if (d.getUTCHours() < DAILY_RESET_HOUR_UTC) ref.setUTCDate(ref.getUTCDate() - 1);
     return ref.toISOString().slice(0,10) + '@' + DAILY_RESET_HOUR_UTC;
-    }
+  }
 
   const map = new Map();
   for (const r of rows) {
@@ -481,7 +469,7 @@ app.get('/stats/daily', (req, res) => {
   res.json({ ok:true, daily: days });
 });
 
-// ---- Admin (real: no simulator)
+// ---- Admin
 app.post('/admin/halt', (req,res)=>{
   if(!requireAdmin(req,res)) return;
   const s=(req.body?.symbol||DEFAULT_SYMBOL).toUpperCase();
@@ -530,25 +518,20 @@ app.post('/admin/reset', (req,res)=>{
   res.json({ ok:true, reset:true });
 });
 
-// NEW: runtime toggle of DRY mode (for your header switch)
 app.post('/admin/toggle_dry', (req,res)=>{
   if(!requireAdmin(req,res)) return;
-  if (typeof req.body?.dry !== 'undefined') {
-    DRY = String(req.body.dry).toLowerCase() === 'true';
-  } else {
-    DRY = !DRY;
-  }
+  if (typeof req.body?.dry !== 'undefined') DRY = String(req.body.dry).toLowerCase() === 'true';
+  else DRY = !DRY;
   log(`DRY set to ${DRY}`);
   res.json({ ok:true, dry: DRY });
 });
 
-// ---- Webhook (real)
+// ---- Webhook
 app.post('/webhook', async (req,res)=>{
   try{
     if (!verify(req)) return res.status(401).json({ ok:false, error:'unauthorized' });
     ensureBucket();
 
-    // optional daily pnl cap
     if (DAILY_PNL_CAP_USDT > 0 && daily.pnl >= DAILY_PNL_CAP_USDT) {
       log(`DAILY CAP reached: ${daily.pnl.toFixed(4)} USDT`);
       return res.status(423).json({ ok:false, error:'daily_cap' });
@@ -578,6 +561,13 @@ app.post('/webhook', async (req,res)=>{
     const notional = reducedNotional(symbol, baseNotional);
     const amt = await notionalToAmount(symbol, notional);
 
+    // EXEC event (for live feed)
+    tradeTimes.push(now());
+    daily.trades += 1;
+    log(`EXEC ${signal} ${symbol} notional=${notional} lev=${lev}`);
+    sseEmit('exec', { ts: now(), symbol, signal, lev, notionalUSDT: notional });
+
+    // LIVE: place orders with CCXT
     if (!DRY){
       if (signal==='LONG') await mexc.createMarketBuyOrder(symbol, amt);
       else if (signal==='SHORT') await mexc.createMarketSellOrder(symbol, amt);
@@ -585,22 +575,47 @@ app.post('/webhook', async (req,res)=>{
       else if (signal==='CLOSE_SHORT') await mexc.createMarketBuyOrder(symbol, amt);
     }
 
-    tradeTimes.push(now());
-    daily.trades += 1;
-    log(`EXEC ${signal} ${symbol} notional=${notional} lev=${lev}`);
-    sseEmit('exec', { ts: now(), symbol, signal, lev, notionalUSDT: notional });
+    // PAPER MODE: simulate fills so they appear on the dashboard
+    if (DRY){
+      const t = await mexc.fetchTicker(symbol).catch(()=>null);
+      const px = t?.last || Number(t?.info?.lastPrice) || 0;
+      const feeUSDT = (notional * PAPER_FEE_PCT) / 100;
 
-    // Optional timed auto-close
+      if (px > 0) {
+        if (signal === 'LONG' || signal === 'CLOSE_SHORT') {
+          markFill(symbol, 'buy',  px, amt, feeUSDT);
+        } else if (signal === 'SHORT' || signal === 'CLOSE_LONG') {
+          markFill(symbol, 'sell', px, amt, feeUSDT);
+        }
+      }
+
+      if (relayTimer && autoCloseSec > 0 && (signal==='LONG' || signal==='SHORT')){
+        setTimeout(async ()=>{
+          const tt = await mexc.fetchTicker(symbol).catch(()=>null);
+          const px2 = tt?.last || Number(tt?.info?.lastPrice) || px || 0;
+          const fee2 = (notional * PAPER_FEE_PCT) / 100;
+          try{
+            if (signal==='LONG')  markFill(symbol, 'sell', px2, amt, fee2);
+            if (signal==='SHORT') markFill(symbol, 'buy',  px2, amt, fee2);
+            log(`AUTO-CLOSE (paper) ${symbol} after ${autoCloseSec}s`);
+          }catch(e){ log('paper auto-close error: ' + (e?.message||e)); }
+        }, autoCloseSec*1000);
+      }
+    }
+
+    // LIVE timed auto-close (optional)
     if (!DRY && relayTimer && autoCloseSec > 0 && (signal==='LONG' || signal==='SHORT')){
       setTimeout(async ()=>{
         try{
           const side = (signal==='LONG') ? 'sell' : 'buy';
-          const t = await mexc.fetchTicker(symbol).catch(()=>null);
-          const px = t?.last || Number(t?.info?.lastPrice) || 0;
-          const fee = 0;
-          if (side==='buy') markFill(symbol, 'buy', px, amt, fee);
-          else markFill(symbol, 'sell', px, amt, fee);
-          if (signal==='LONG') await mexc.createMarketSellOrder(symbol, amt);
+          const t2 = await mexc.fetchTicker(symbol).catch(()=>null);
+          const px2 = t2?.last || Number(t2?.info?.lastPrice) || 0;
+          const fee2 = 0;
+          if (px2 > 0) {
+            if (side==='buy')  markFill(symbol, 'buy',  px2, amt, fee2);
+            else               markFill(symbol, 'sell', px2, amt, fee2);
+          }
+          if (signal==='LONG')  await mexc.createMarketSellOrder(symbol, amt);
           if (signal==='SHORT') await mexc.createMarketBuyOrder(symbol, amt);
           log(`AUTO-CLOSE ${symbol} after ${autoCloseSec}s`);
         }catch(e){ log('auto-close error: ' + (e?.message||e)); }
@@ -613,23 +628,11 @@ app.post('/webhook', async (req,res)=>{
   }
 });
 
-// ---- Optimizer (OpenRouter GPT-5) — returns a JSON suggestion
+// ---- Optimizer (OpenRouter GPT-5)
 app.post('/optimizer/suggest', async (req, res) => {
   try {
     if (!requireAdmin(req, res)) return;
     if (!OPENROUTER_API_KEY) return res.status(400).json({ ok:false, error:'OPENROUTER_API_KEY not set' });
-
-    // Build compact snapshot from current memory
-    const statsLike = {
-      pnl: {},
-      quality: {},
-      risk: {},
-      streaks: {}
-    };
-    // minimal quick calc
-    const wins = fills.filter(f => (f.realized||0) > 0).length;
-    const losses = fills.filter(f => (f.realized||0) < 0).length;
-    statsLike.streaks = { wins, losses };
 
     const prompt = `
 You are an automated strategy optimizer for a MEXC scalper (futures).
@@ -637,14 +640,11 @@ Goal: improve net profit while controlling max drawdown.
 Return STRICT JSON with keys: minSignals, indicators, risk, execution. No commentary.
 
 Constraints:
-- minSignals must be 3 or 4
 - indicators may adjust: rsiLen (7..21), rsiBuy (50..65), rsiSell (35..50),
   bbLen (10..40), bbDev (1.6..3.5), emaFast (5..21), emaSlow (30..100), atrLen (7..21), atrMult (0.8..3.0)
 - risk: leverage (1..125), notionalUSDT (5..200), cooldownSec (0..600)
 - execution: maxSpreadPct (0.01..0.15), maxTradesPerHour (5..200)
-
-Current:
-${JSON.stringify({
+Current: ${JSON.stringify({
   dry: DRY,
   defaults: { DEFAULT_SYMBOL, DEFAULT_NOTIONAL, DEFAULT_LEVERAGE, DEFAULT_ISOLATED },
   guards: { MAX_TRADES_PER_HOUR, MAX_SPREAD_PCT, REJECT_IF_THIN_BOOK, COOLDOWN_AFTER_LOSS_SEC },
@@ -654,10 +654,7 @@ ${JSON.stringify({
 
     const r = await fetch(OPENROUTER_URL, {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
+      headers: { 'Authorization': `Bearer ${OPENROUTER_API_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: OPENROUTER_MODEL,
         messages: [
@@ -685,11 +682,11 @@ ${JSON.stringify({
   }
 });
 
-// ---- Background fill sync (real fills when API keys are present)
+// ---- Background (live) fill sync
 async function pollFills(){
   try{
     ensureBucket();
-    const symbols = new Set([DEFAULT_SYMBOL]); // extend with more if needed
+    const symbols = new Set([DEFAULT_SYMBOL]);
     for (const s of symbols){
       const trades = await mexc.fetchMyTrades(s, undefined, 100).catch(()=>[]);
       for (const t of trades){
