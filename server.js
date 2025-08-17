@@ -6,22 +6,22 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 /**
- * MEXC Scalper Relay — Advanced
+ * MEXC Scalper Relay — Advanced (NO SIMULATOR)
  * - Webhook receiver for TradingView alerts (/webhook)
  * - Guards: rate-limit per hour, spread limit, per-symbol cooldown, loss-streak halt
+ * - Paper mode (DRY_RUN=true): simulates fills so charts & stats update
  * - Auto-close (optional) via relayTimer + autoCloseSec
- * - SSE live stream (/stream) for dashboard  (events: hello, log, exec, fill)
+ * - SSE live stream (/stream) for dashboard
  * - CSV exports: /pnl.csv , /logs.csv
- * - JSON APIs: /stats , /stats/daily , /fills , /logs
- * - Admin: /admin/halt, /admin/unhalt, /admin/cooldown, /admin/halt_all, /admin/unhalt_all, /admin/reset, /admin/toggle_dry
- * - Background fill sync with CCXT (live fills) every 15s
- * - DRY_RUN (Paper Mode) now SIMULATES fills so the dashboard shows results
- * - Optimizer: /optimizer/suggest (OpenRouter)
+ * - JSON APIs: /stats , /stats/daily , /fills , /logs , /config , /health
+ * - Admin endpoints: /admin/halt, /admin/unhalt, /admin/cooldown, /admin/halt_all, /admin/unhalt_all, /admin/reset, /admin/toggle_dry
+ * - Background fill sync with CCXT (fetchMyTrades) every 15s
+ * - Optimizer: /optimizer/suggest → OpenRouter (optional)
  */
 
 const app = express();
 
-// ---- raw body capture (for HMAC)
+// Capture raw body for optional HMAC verification
 let rawBody = Buffer.alloc(0);
 app.use((req, res, next) => {
   const chunks = [];
@@ -34,45 +34,46 @@ app.use((req, res, next) => {
   });
 });
 
+// Helper to read env with default
 const E = (k, d = null) => process.env[k] ?? d;
 
 // ---- Core env
 const PORT = Number(E('PORT', 8080));
-let DRY  = String(E('DRY_RUN', 'true')).toLowerCase() === 'true';  // togglable at runtime
+let DRY  = String(E('DRY_RUN', 'true')).toLowerCase() === 'true'; // let so we can toggle at runtime
 const SECRET = E('WEBHOOK_SECRET', '');
 const DASHBOARD_TOKEN = E('DASHBOARD_TOKEN', '');
 
-// Defaults (you can override via env)
-const DEFAULT_SYMBOL   = E('DEFAULT_SYMBOL', 'SOL/USDT:USDT').toUpperCase();
+// Defaults (override via env DEFAULT_SYMBOL, etc.)
+const DEFAULT_SYMBOL   = E('DEFAULT_SYMBOL', 'BTC/USDT:USDT').toUpperCase();
 const DEFAULT_NOTIONAL = Number(E('DEFAULT_NOTIONAL_USDT', 20));
 const DEFAULT_LEVERAGE = Number(E('DEFAULT_LEVERAGE', 100));
 const DEFAULT_ISOLATED = String(E('DEFAULT_ISOLATED', 'true')).toLowerCase() === 'true';
 
 // Guards
-const MAX_TRADES_PER_HOUR   = Number(E('MAX_TRADES_PER_HOUR', 60));
-const MAX_SPREAD_PCT        = Number(E('MAX_SPREAD_PCT', 0.03));
-const REJECT_IF_THIN_BOOK   = String(E('REJECT_IF_THIN_BOOK','true')).toLowerCase()==='true';
+const MAX_TRADES_PER_HOUR     = Number(E('MAX_TRADES_PER_HOUR', 60));
+const MAX_SPREAD_PCT          = Number(E('MAX_SPREAD_PCT', 0.03)); // 0.03% default
+const REJECT_IF_THIN_BOOK     = String(E('REJECT_IF_THIN_BOOK','true')).toLowerCase()==='true';
 const COOLDOWN_AFTER_LOSS_SEC = Number(E('COOLDOWN_AFTER_LOSS_SEC', 120));
 
-// Loss streak
+// Loss-streak handling
 const MAX_CONSEC_LOSSES      = Number(E('MAX_CONSEC_LOSSES', 3));
 const LOSS_HALT_COOLDOWN_MIN = Number(E('LOSS_HALT_COOLDOWN_MIN', 10));
 const LOSS_REDUCE_FACTORS    = (()=> { try { return JSON.parse(E('LOSS_REDUCE_FACTORS','[1.0,0.7,0.4]')); } catch { return [1.0,0.7,0.4]; } })();
 const LOSS_MIN_NOTIONAL      = Number(E('LOSS_MIN_NOTIONAL', 5));
 
-// Daily
-const DAILY_PNL_CAP_USDT    = Number(E('DAILY_PNL_CAP_USDT', 0));
-const DAILY_RESET_HOUR_UTC  = Number(E('DAILY_RESET_HOUR_UTC', 0));
+// Daily reset / cap
+const DAILY_PNL_CAP_USDT   = Number(E('DAILY_PNL_CAP_USDT', 0)); // 0 = off
+const DAILY_RESET_HOUR_UTC = Number(E('DAILY_RESET_HOUR_UTC', 0));
 
-// Paper mode fee (applied to simulated fills; in % of notional)
-const PAPER_FEE_PCT = Number(E('PAPER_FEE_PCT', 0.06)); // 0.06% typical taker
-
-// Optional HMAC
+// Optional HMAC for extra verification
 const HMAC_ENABLED = String(E('HMAC_ENABLED','false')).toLowerCase()==='true';
 const HMAC_SECRET  = E('HMAC_SECRET','');
 const HMAC_HEADER  = E('HMAC_HEADER','X-Signature');
 
-// CORS
+// Paper mode fee assumption (perc. of notional, e.g. 0.04% taker)
+const PAPER_FEE_PCT = Number(E('PAPER_FEE_PCT', 0.04));
+
+// CORS for Netlify/other dashboard origins (default allow all)
 const NETLIFY_ORIGIN = E('NETLIFY_ORIGIN','*');
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', NETLIFY_ORIGIN);
@@ -92,21 +93,23 @@ const mexc = new ccxt.mexc({
 
 // ---- Optimizer (OpenRouter)
 const OPENROUTER_API_KEY = E('OPENROUTER_API_KEY', '');
-const OPENROUTER_URL   = 'https://openrouter.ai/api/v1/chat/completions';
+const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const OPENROUTER_MODEL = E('OPENROUTER_MODEL', 'openrouter/auto');
 
 // ---- State
 const now = () => Date.now();
-const tradeTimes = [];
+const tradeTimes = [];             // timestamps (ms) of executions for hourly rate-limit
 const cooldownUntil = new Map();   // symbol -> ts(ms)
 const lossStreak    = new Map();   // symbol -> count
 const haltedUntil   = new Map();   // symbol -> 0 (manual) | ts(ms)
 const lastSpread    = new Map();   // symbol -> pct
-const fills         = [];          // fill rows for dashboard/CSV
-const events        = [];          // text logs
-const daily         = { key: '', pnl: 0, trades: 0 };
+const fills         = [];          // trade fills (realized pnl tracked)
+const events        = [];          // text logs for /logs.csv and SSE stream
+const daily = { key: '', pnl: 0, trades: 0 };
 
-const inv = new Map();  // inventory for realized PnL: symbol -> { pos, avg }
+// Inventory for realized pnl calc from executed fills
+const inv = new Map(); // symbol -> { pos, avg }
+
 let GLOBAL_HALT = false;
 
 // ---- SSE
@@ -116,7 +119,7 @@ function sseEmit(type, payload) {
   for (const c of sseClients) { try { c.res.write(msg); } catch {} }
 }
 
-// ---- Utils
+// ---- Utilities
 function log(s) {
   const e = `[${new Date().toISOString()}] ${s}`;
   events.push(e);
@@ -209,10 +212,10 @@ function reducedNotional(sym, base) {
 }
 
 // Mark a fill and compute realized pnl against inventory
-function markFill(sym, side, price, amount, feeUSDT) {
+function markFill(sym, side, price, amount, fee) {
   if (!inv.has(sym)) inv.set(sym, { pos:0, avg:0 });
   const st = inv.get(sym);
-  let realized = -(feeUSDT || 0);
+  let realized = -(fee || 0);
   const signed = (side === 'buy' ? 1 : -1) * amount;
 
   // Same direction -> average
@@ -225,8 +228,8 @@ function markFill(sym, side, price, amount, feeUSDT) {
       st.avg = newAbs ? (notOld + notAdd) / newAbs : 0;
       st.pos = newPos;
       inv.set(sym, st);
-      fills.push({ ts: now(), symbol: sym, side, price, amount, fee: feeUSDT, realized });
-      sseEmit('fill', { ts: now(), symbol: sym, side, price, amount, fee: feeUSDT, realized });
+      fills.push({ ts: now(), symbol: sym, side, price, amount, fee, realized });
+      sseEmit('fill', { ts: now(), symbol: sym, side, price, amount, fee, realized });
       return realized;
     }
   }
@@ -254,7 +257,7 @@ function markFill(sym, side, price, amount, feeUSDT) {
     inv.set(sym, st);
   }
 
-  fills.push({ ts: now(), symbol: sym, side, price, amount, fee: feeUSDT, realized });
+  fills.push({ ts: now(), symbol: sym, side, price, amount, fee, realized });
   daily.pnl += realized;
 
   if (realized < 0) {
@@ -268,7 +271,7 @@ function markFill(sym, side, price, amount, feeUSDT) {
   }
 
   if (fills.length > 5000) fills.splice(0, fills.length - 5000);
-  sseEmit('fill', { ts: now(), symbol: sym, side, price, amount, fee: feeUSDT, realized });
+  sseEmit('fill', { ts: now(), symbol: sym, side, price, amount, fee, realized });
 }
 
 // ---- Static
@@ -349,8 +352,13 @@ app.get('/logs.csv', (req,res)=>{
   res.end();
 });
 
-app.get('/fills', (req, res) => res.json({ ok:true, fills }));
-app.get('/logs',  (req, res) => res.json({ ok:true, logs: events.slice(-500) }));
+// JSON endpoints for frontend
+app.get('/fills', (req, res) => {
+  res.json({ ok:true, fills });
+});
+app.get('/logs', (req, res) => {
+  res.json({ ok:true, logs: events.slice(-500) });
+});
 
 app.get('/stats', (req, res) => {
   const rows = fills.map(f => ({
@@ -363,7 +371,8 @@ app.get('/stats', (req, res) => {
     amount: Number(f.amount || 0)
   })).sort((a,b)=>a.ts-b.ts);
 
-  let equity = [], cum = 0;
+  let equity = [];
+  let cum = 0;
   for (const r of rows) { cum += r.realized; equity.push({ ts: r.ts, equity: Number(cum.toFixed(8)) }); }
 
   let peak = -Infinity, ddSeries = [], maxDD = 0;
@@ -407,7 +416,11 @@ app.get('/stats', (req, res) => {
     dry: DRY,
     dailyKey: daily.key,
     counts: { trades: rows.length, wins: wins.length, losses: losses.length },
-    pnl: { grossProfit: Number(grossProfit.toFixed(6)), grossLoss: Number(grossLoss.toFixed(6)), net: netPnl },
+    pnl: {
+      grossProfit: Number(grossProfit.toFixed(6)),
+      grossLoss:   Number(grossLoss.toFixed(6)),
+      net:         netPnl
+    },
     quality: {
       winRate: Number((winRate*100).toFixed(2)),
       avgWin: Number(avgWin.toFixed(6)),
@@ -520,8 +533,11 @@ app.post('/admin/reset', (req,res)=>{
 
 app.post('/admin/toggle_dry', (req,res)=>{
   if(!requireAdmin(req,res)) return;
-  if (typeof req.body?.dry !== 'undefined') DRY = String(req.body.dry).toLowerCase() === 'true';
-  else DRY = !DRY;
+  if (typeof req.body?.dry !== 'undefined') {
+    DRY = String(req.body.dry).toLowerCase() === 'true';
+  } else {
+    DRY = !DRY;
+  }
   log(`DRY set to ${DRY}`);
   res.json({ ok:true, dry: DRY });
 });
@@ -561,86 +577,63 @@ app.post('/webhook', async (req,res)=>{
     const notional = reducedNotional(symbol, baseNotional);
     const amt = await notionalToAmount(symbol, notional);
 
-    // EXEC event (for live feed)
+    // Record exec for feeds/stats
     tradeTimes.push(now());
     daily.trades += 1;
     log(`EXEC ${signal} ${symbol} notional=${notional} lev=${lev}`);
     sseEmit('exec', { ts: now(), symbol, signal, lev, notionalUSDT: notional });
 
-    // EXEC event (for live feed) — unified for LIVE & PAPER
-tradeTimes.push(now());
-daily.trades += 1;
-log(`EXEC ${signal} ${symbol} notional=${notional} lev=${lev}`);
-sseEmit('exec', { ts: now(), symbol, signal, lev, notionalUSDT: notional });
-
-// === ORDER HANDLING ===
-// If DRY_RUN=true -> simulate fill so it shows on dashboard
-// If DRY_RUN=false -> place real market order on MEXC
-if (DRY) {
-  // paper fill at current ticker price, include tiny fee so PnL isn't unrealistically perfect
-  const t = await mexc.fetchTicker(symbol).catch(()=>null);
-  const px = t?.last || Number(t?.info?.lastPrice) || 0;
-  if (px > 0) {
-    const feePct = Number(process.env.PAPER_FEE_PCT ?? 0.06); // % of notional; default 0.06% taker
-    const feeUSDT = (notional * (feePct / 100));
-    if (signal === 'LONG' || signal === 'CLOSE_SHORT') {
-      markFill(symbol, 'buy',  px, amt, feeUSDT);
-      log(`[paper] BUY ${symbol} qty=${amt} @ ${px} (fee≈${feeUSDT.toFixed(4)} USDT)`);
-    } else if (signal === 'SHORT' || signal === 'CLOSE_LONG') {
-      markFill(symbol, 'sell', px, amt, feeUSDT);
-      log(`[paper] SELL ${symbol} qty=${amt} @ ${px} (fee≈${feeUSDT.toFixed(4)} USDT)`);
-    }
-  } else {
-    log('[paper] skip fill: no price');
-  }
-} else {
-  // live orders with CCXT
-  if (signal === 'LONG')        await mexc.createMarketBuyOrder(symbol, amt);
-  else if (signal === 'SHORT')  await mexc.createMarketSellOrder(symbol, amt);
-  else if (signal === 'CLOSE_LONG')  await mexc.createMarketSellOrder(symbol, amt);
-  else if (signal === 'CLOSE_SHORT') await mexc.createMarketBuyOrder(symbol, amt);
-}
-
-      if (relayTimer && autoCloseSec > 0 && (signal==='LONG' || signal==='SHORT')){
-        setTimeout(async ()=>{
-          const tt = await mexc.fetchTicker(symbol).catch(()=>null);
-          const px2 = tt?.last || Number(tt?.info?.lastPrice) || px || 0;
-          const fee2 = (notional * PAPER_FEE_PCT) / 100;
-          try{
-            if (signal==='LONG')  markFill(symbol, 'sell', px2, amt, fee2);
-            if (signal==='SHORT') markFill(symbol, 'buy',  px2, amt, fee2);
-            log(`AUTO-CLOSE (paper) ${symbol} after ${autoCloseSec}s`);
-          }catch(e){ log('paper auto-close error: ' + (e?.message||e)); }
-        }, autoCloseSec*1000);
+    // ---- LIVE: send orders to exchange
+    if (!DRY){
+      if (signal==='LONG')        await mexc.createMarketBuyOrder(symbol, amt);
+      else if (signal==='SHORT')  await mexc.createMarketSellOrder(symbol, amt);
+      else if (signal==='CLOSE_LONG')  await mexc.createMarketSellOrder(symbol, amt);
+      else if (signal==='CLOSE_SHORT') await mexc.createMarketBuyOrder(symbol, amt);
+    } else {
+      // ---- PAPER: simulate fills so dashboard updates
+      const t = await mexc.fetchTicker(symbol).catch(()=>null);
+      const px = t?.last || Number(t?.info?.lastPrice) || 0;
+      const feeUSDT = (notional * PAPER_FEE_PCT) / 100; // convert pct → fraction
+      if (px > 0) {
+        if (signal==='LONG' || signal==='CLOSE_SHORT') {
+          markFill(symbol, 'buy',  px, amt, feeUSDT);
+        } else if (signal==='SHORT' || signal==='CLOSE_LONG') {
+          markFill(symbol, 'sell', px, amt, feeUSDT);
+        }
       }
     }
 
-    // LIVE timed auto-close (optional)
-    if (!DRY && relayTimer && autoCloseSec > 0 && (signal==='LONG' || signal==='SHORT')){
-      setTimeout(async ()=>{
-        try{
-          const side = (signal==='LONG') ? 'sell' : 'buy';
-          const t2 = await mexc.fetchTicker(symbol).catch(()=>null);
+    // Optional timed auto-close (LIVE only; paper already marked a fill)
+    if (!DRY && relayTimer && autoCloseSec > 0 &&
+       (signal === 'LONG' || signal === 'SHORT')) {
+      setTimeout(async () => {
+        try {
+          const t2 = await mexc.fetchTicker(symbol).catch(() => null);
           const px2 = t2?.last || Number(t2?.info?.lastPrice) || 0;
-          const fee2 = 0;
+          const amt2 = await notionalToAmount(symbol, notional);
           if (px2 > 0) {
-            if (side==='buy')  markFill(symbol, 'buy',  px2, amt, fee2);
-            else               markFill(symbol, 'sell', px2, amt, fee2);
+            if (signal === 'LONG') {
+              await mexc.createMarketSellOrder(symbol, amt2);
+              log(`[autoClose] CLOSED LONG ${symbol} @ ${px2}`);
+            } else if (signal === 'SHORT') {
+              await mexc.createMarketBuyOrder(symbol, amt2);
+              log(`[autoClose] CLOSED SHORT ${symbol} @ ${px2}`);
+            }
           }
-          if (signal==='LONG')  await mexc.createMarketSellOrder(symbol, amt);
-          if (signal==='SHORT') await mexc.createMarketBuyOrder(symbol, amt);
-          log(`AUTO-CLOSE ${symbol} after ${autoCloseSec}s`);
-        }catch(e){ log('auto-close error: ' + (e?.message||e)); }
-      }, autoCloseSec*1000);
+        } catch (e) {
+          log('autoClose error: ' + (e?.message || e));
+        }
+      }, autoCloseSec * 1000);
     }
 
     res.json({ ok:true, dry:DRY, symbol, signal, lev, notionalUSDT:notional, autoCloseSec, spreadPct: sp });
-  }catch(e){
+  } catch(e){
+    console.error('webhook error', e);
     res.status(500).json({ ok:false, error:String(e?.message||e) });
   }
 });
 
-// ---- Optimizer (OpenRouter GPT-5)
+// ---- Optimizer (OpenRouter GPT-5) — returns a JSON suggestion
 app.post('/optimizer/suggest', async (req, res) => {
   try {
     if (!requireAdmin(req, res)) return;
@@ -652,11 +645,14 @@ Goal: improve net profit while controlling max drawdown.
 Return STRICT JSON with keys: minSignals, indicators, risk, execution. No commentary.
 
 Constraints:
+- minSignals must be 3 or 4
 - indicators may adjust: rsiLen (7..21), rsiBuy (50..65), rsiSell (35..50),
   bbLen (10..40), bbDev (1.6..3.5), emaFast (5..21), emaSlow (30..100), atrLen (7..21), atrMult (0.8..3.0)
 - risk: leverage (1..125), notionalUSDT (5..200), cooldownSec (0..600)
 - execution: maxSpreadPct (0.01..0.15), maxTradesPerHour (5..200)
-Current: ${JSON.stringify({
+
+Current:
+${JSON.stringify({
   dry: DRY,
   defaults: { DEFAULT_SYMBOL, DEFAULT_NOTIONAL, DEFAULT_LEVERAGE, DEFAULT_ISOLATED },
   guards: { MAX_TRADES_PER_HOUR, MAX_SPREAD_PCT, REJECT_IF_THIN_BOOK, COOLDOWN_AFTER_LOSS_SEC },
@@ -666,7 +662,10 @@ Current: ${JSON.stringify({
 
     const r = await fetch(OPENROUTER_URL, {
       method: 'POST',
-      headers: { 'Authorization': `Bearer ${OPENROUTER_API_KEY}`, 'Content-Type': 'application/json' },
+      headers: {
+        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
       body: JSON.stringify({
         model: OPENROUTER_MODEL,
         messages: [
@@ -694,11 +693,11 @@ Current: ${JSON.stringify({
   }
 });
 
-// ---- Background (live) fill sync
+// ---- Background fill sync (real fills when API keys are present)
 async function pollFills(){
   try{
     ensureBucket();
-    const symbols = new Set([DEFAULT_SYMBOL]);
+    const symbols = new Set([DEFAULT_SYMBOL]); // extend with more if needed
     for (const s of symbols){
       const trades = await mexc.fetchMyTrades(s, undefined, 100).catch(()=>[]);
       for (const t of trades){
