@@ -64,6 +64,7 @@ const MAX_TRADES_PER_HOUR     = Number(E('MAX_TRADES_PER_HOUR', 60));
 const MAX_SPREAD_PCT          = Number(E('MAX_SPREAD_PCT', 0.03)); // 0.03% default
 const REJECT_IF_THIN_BOOK     = String(E('REJECT_IF_THIN_BOOK','true')).toLowerCase()==='true';
 const COOLDOWN_AFTER_LOSS_SEC = Number(E('COOLDOWN_AFTER_LOSS_SEC', 120));
+const PAPER_FEE_PCT = Number(E('PAPER_FEE_PCT', 0.07));
 
 // Loss-streak handling
 const MAX_CONSEC_LOSSES      = Number(E('MAX_CONSEC_LOSSES', 3));
