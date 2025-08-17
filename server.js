@@ -21,9 +21,14 @@ import { fileURLToPath } from 'url';
 
 const app = express();
 
-// Capture raw body for optional HMAC verification
+// Capture raw body only for POST-like requests so GET/HEAD never hang
 let rawBody = Buffer.alloc(0);
 app.use((req, res, next) => {
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    rawBody = Buffer.alloc(0);
+    req.body = {};
+    return next();
+  }
   const chunks = [];
   req.on('data', c => chunks.push(c));
   req.on('end', () => {
@@ -32,6 +37,7 @@ app.use((req, res, next) => {
     catch { req.body = {}; }
     next();
   });
+  req.on('error', () => { rawBody = Buffer.alloc(0); req.body = {}; next(); });
 });
 
 // Helper to read env with default
