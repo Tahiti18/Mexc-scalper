@@ -97,6 +97,7 @@ const mexc = new ccxt.mexc({
   apiKey: E('MEXC_KEY',''),
   secret: E('MEXC_SECRET',''),
   enableRateLimit: true,
+  timeout: 20000,                 // wait up to 20s (was 10s)
   options: { defaultType: 'swap' }
 });
 
