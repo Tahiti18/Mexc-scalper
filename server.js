@@ -723,4 +723,6 @@ async function pollFills(){
 setInterval(pollFills, 15000);
 
 // ---- Start
-app.listen(PORT, ()=> console.log(`[relay] listening on :${PORT}, DRY_RUN=${DRY}`));
+app.listen(PORT, '0.0.0.0', () =>
+  console.log(`[relay] listening on 0.0.0.0:${PORT}, DRY_RUN=${DRY}`)
+);
