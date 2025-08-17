@@ -1,4 +1,3 @@
-
 import 'dotenv/config';
 import express from 'express';
 import ccxt from 'ccxt';
@@ -14,9 +13,10 @@ import { fileURLToPath } from 'url';
  * - SSE live stream (/stream) for dashboard
  * - CSV exports: /pnl.csv , /logs.csv
  * - JSON APIs: /stats , /stats/daily , /fills , /logs
- * - Admin endpoints (real): /admin/halt, /admin/unhalt, /admin/cooldown, /admin/halt_all, /admin/unhalt_all, /admin/reset
+ * - Admin endpoints (real): /admin/halt, /admin/unhalt, /admin/cooldown, /admin/halt_all, /admin/unhalt_all, /admin/reset, /admin/toggle_dry
  * - Background fill sync with CCXT (fetchMyTrades) every 15s
  * - DRY_RUN mode prevents any live order placements
+ * - Optimizer: /optimizer/suggest → OpenRouter (GPT-5)
  */
 
 const app = express();
@@ -39,7 +39,7 @@ const E = (k, d = null) => process.env[k] ?? d;
 
 // ---- Core env
 const PORT = Number(E('PORT', 8080));
-const DRY  = String(E('DRY_RUN', 'true')).toLowerCase() === 'true';
+let DRY  = String(E('DRY_RUN', 'true')).toLowerCase() === 'true'; // CHANGED: let (toggle at runtime)
 const SECRET = E('WEBHOOK_SECRET', '');
 const DASHBOARD_TOKEN = E('DASHBOARD_TOKEN', '');
 
@@ -88,6 +88,11 @@ const mexc = new ccxt.mexc({
   options: { defaultType: 'swap' }
 });
 
+// ---- Optimizer (OpenRouter)
+const OPENROUTER_API_KEY = E('OPENROUTER_API_KEY', '');
+const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
+const OPENROUTER_MODEL = E('OPENROUTER_MODEL', 'openrouter/auto');
+
 // ---- State
 const now = () => Date.now();
 const tradeTimes = [];             // timestamps (ms) of executions for hourly rate-limit
@@ -116,6 +121,8 @@ function log(s) {
   const e = `[${new Date().toISOString()}] ${s}`;
   events.push(e);
   if (events.length > 2000) events.splice(0, events.length - 2000);
+  // NEW: push every log to SSE live feed
+  try { sseEmit('log', { ts: Date.now(), line: s }); } catch {}
 }
 
 function pruneHour() {
@@ -135,7 +142,8 @@ function ensureBucket() {
   const key = startBucket().toISOString().slice(0,10) + `@${DAILY_RESET_HOUR_UTC}`;
   if (daily.key !== key) {
     daily.key = key; daily.pnl = 0; daily.trades = 0;
-    fills.length = 0; inv.clear(); lossStreak.clear(); haltedUntil.clear(); log('Daily reset ' + key);
+    fills.length = 0; inv.clear(); lossStreak.clear(); haltedUntil.clear(); lastSpread.clear();
+    log('Daily reset ' + key);
   }
 }
 
@@ -338,7 +346,8 @@ app.get('/pnl.csv', (req,res)=>{
 app.get('/logs.csv', (req,res)=>{
   res.set('content-type','text/csv; charset=utf-8');
   res.write('ts_iso,event\n');
-  for (const e of events) res.write(`${e.slice(1,25)},${e.replace(/^[^\\]]+\\]\\s*/,'').replace(/,/g,';')}\n`);
+  // FIXED: proper regex (no stray backslashes)
+  for (const e of events) res.write(`${e.slice(1,25)},${e.replace(/^[^\]]+\]\s*/,'').replace(/,/g,';')}\n`);
   res.end();
 });
 
@@ -478,7 +487,6 @@ app.post('/admin/halt', (req,res)=>{
   const s=(req.body?.symbol||DEFAULT_SYMBOL).toUpperCase();
   haltedUntil.set(s, 0);
   log('HALT ' + s);
-  sseEmit('log',{ts:Date.now(),line:'HALT '+s});
   res.json({ ok:true, halted:s });
 });
 
@@ -488,7 +496,6 @@ app.post('/admin/unhalt', (req,res)=>{
   haltedUntil.delete(s);
   lossStreak.set(s,0);
   log('UNHALT ' + s);
-  sseEmit('log',{ts:Date.now(),line:'UNHALT '+s});
   res.json({ ok:true, unhalted:s });
 });
 
@@ -498,7 +505,6 @@ app.post('/admin/cooldown', (req,res)=>{
   const sec=Number(req.body?.seconds||60);
   cooldownUntil.set(s, now()+sec*1000);
   log(`COOLDOWN ${s} ${sec}s`);
-  sseEmit('log',{ts:Date.now(),line:`COOLDOWN ${s} ${sec}s`});
   res.json({ ok:true, cooldown:{ symbol:s, seconds:sec } });
 });
 
@@ -506,7 +512,6 @@ app.post('/admin/halt_all', (req,res)=>{
   if(!requireAdmin(req,res)) return;
   GLOBAL_HALT=true;
   log('MASTER HALT enabled');
-  sseEmit('log',{ts:Date.now(),line:'MASTER HALT enabled'});
   res.json({ ok:true, globalHalt: GLOBAL_HALT });
 });
 
@@ -514,7 +519,6 @@ app.post('/admin/unhalt_all', (req,res)=>{
   if(!requireAdmin(req,res)) return;
   GLOBAL_HALT=false;
   log('MASTER HALT disabled');
-  sseEmit('log',{ts:Date.now(),line:'MASTER HALT disabled'});
   res.json({ ok:true, globalHalt: GLOBAL_HALT });
 });
 
@@ -523,8 +527,19 @@ app.post('/admin/reset', (req,res)=>{
   fills.length=0; inv.clear(); daily.pnl=0; daily.trades=0;
   lossStreak.clear(); cooldownUntil.clear(); haltedUntil.clear(); lastSpread.clear();
   log('RESET: cleared fills, inventory, daily counters');
-  sseEmit('log',{ts:Date.now(),line:'RESET: cleared fills, inventory, daily counters'});
   res.json({ ok:true, reset:true });
+});
+
+// NEW: runtime toggle of DRY mode (for your header switch)
+app.post('/admin/toggle_dry', (req,res)=>{
+  if(!requireAdmin(req,res)) return;
+  if (typeof req.body?.dry !== 'undefined') {
+    DRY = String(req.body.dry).toLowerCase() === 'true';
+  } else {
+    DRY = !DRY;
+  }
+  log(`DRY set to ${DRY}`);
+  res.json({ ok:true, dry: DRY });
 });
 
 // ---- Webhook (real)
@@ -532,6 +547,13 @@ app.post('/webhook', async (req,res)=>{
   try{
     if (!verify(req)) return res.status(401).json({ ok:false, error:'unauthorized' });
     ensureBucket();
+
+    // optional daily pnl cap
+    if (DAILY_PNL_CAP_USDT > 0 && daily.pnl >= DAILY_PNL_CAP_USDT) {
+      log(`DAILY CAP reached: ${daily.pnl.toFixed(4)} USDT`);
+      return res.status(423).json({ ok:false, error:'daily_cap' });
+    }
+
     const b = req.body || {};
     const signal = String(b.signal || '').toUpperCase();
     const rawSymbol = (b.symbol || DEFAULT_SYMBOL).toUpperCase();
@@ -541,6 +563,9 @@ app.post('/webhook', async (req,res)=>{
     const relayTimer = Boolean(b.relayTimer);
     const autoCloseSec = Number(b.autoCloseSec || 0);
 
+    if (!['LONG','SHORT','CLOSE_LONG','CLOSE_SHORT'].includes(signal)) {
+      return res.status(400).json({ ok:false, error:'bad_signal' });
+    }
     if (isHalted(symbol)) return res.status(423).json({ ok:false, error:'halted' });
 
     pruneHour();
@@ -558,7 +583,6 @@ app.post('/webhook', async (req,res)=>{
       else if (signal==='SHORT') await mexc.createMarketSellOrder(symbol, amt);
       else if (signal==='CLOSE_LONG') await mexc.createMarketSellOrder(symbol, amt);
       else if (signal==='CLOSE_SHORT') await mexc.createMarketBuyOrder(symbol, amt);
-      else return res.status(400).json({ ok:false, error:'bad_signal' });
     }
 
     tradeTimes.push(now());
@@ -579,7 +603,6 @@ app.post('/webhook', async (req,res)=>{
           if (signal==='LONG') await mexc.createMarketSellOrder(symbol, amt);
           if (signal==='SHORT') await mexc.createMarketBuyOrder(symbol, amt);
           log(`AUTO-CLOSE ${symbol} after ${autoCloseSec}s`);
-          sseEmit('log', { ts: now(), line: `AUTO-CLOSE ${symbol} after ${autoCloseSec}s` });
         }catch(e){ log('auto-close error: ' + (e?.message||e)); }
       }, autoCloseSec*1000);
     }
@@ -587,6 +610,78 @@ app.post('/webhook', async (req,res)=>{
     res.json({ ok:true, dry:DRY, symbol, signal, lev, notionalUSDT:notional, autoCloseSec, spreadPct: sp });
   }catch(e){
     res.status(500).json({ ok:false, error:String(e?.message||e) });
+  }
+});
+
+// ---- Optimizer (OpenRouter GPT-5) — returns a JSON suggestion
+app.post('/optimizer/suggest', async (req, res) => {
+  try {
+    if (!requireAdmin(req, res)) return;
+    if (!OPENROUTER_API_KEY) return res.status(400).json({ ok:false, error:'OPENROUTER_API_KEY not set' });
+
+    // Build compact snapshot from current memory
+    const statsLike = {
+      pnl: {},
+      quality: {},
+      risk: {},
+      streaks: {}
+    };
+    // minimal quick calc
+    const wins = fills.filter(f => (f.realized||0) > 0).length;
+    const losses = fills.filter(f => (f.realized||0) < 0).length;
+    statsLike.streaks = { wins, losses };
+
+    const prompt = `
+You are an automated strategy optimizer for a MEXC scalper (futures).
+Goal: improve net profit while controlling max drawdown.
+Return STRICT JSON with keys: minSignals, indicators, risk, execution. No commentary.
+
+Constraints:
+- minSignals must be 3 or 4
+- indicators may adjust: rsiLen (7..21), rsiBuy (50..65), rsiSell (35..50),
+  bbLen (10..40), bbDev (1.6..3.5), emaFast (5..21), emaSlow (30..100), atrLen (7..21), atrMult (0.8..3.0)
+- risk: leverage (1..125), notionalUSDT (5..200), cooldownSec (0..600)
+- execution: maxSpreadPct (0.01..0.15), maxTradesPerHour (5..200)
+
+Current:
+${JSON.stringify({
+  dry: DRY,
+  defaults: { DEFAULT_SYMBOL, DEFAULT_NOTIONAL, DEFAULT_LEVERAGE, DEFAULT_ISOLATED },
+  guards: { MAX_TRADES_PER_HOUR, MAX_SPREAD_PCT, REJECT_IF_THIN_BOOK, COOLDOWN_AFTER_LOSS_SEC },
+  loss: { MAX_CONSEC_LOSSES, LOSS_HALT_COOLDOWN_MIN, LOSS_REDUCE_FACTORS, LOSS_MIN_NOTIONAL }
+})}
+`.trim();
+
+    const r = await fetch(OPENROUTER_URL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: OPENROUTER_MODEL,
+        messages: [
+          { role: 'system', content: 'You are a disciplined quantitative trading assistant.' },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.2,
+        response_format: { type: 'json_object' }
+      })
+    });
+
+    if (!r.ok) {
+      const t = await r.text();
+      return res.status(502).json({ ok:false, error:'openrouter_error', detail: t.slice(0,500) });
+    }
+    const data = await r.json();
+    const text = data?.choices?.[0]?.message?.content || '{}';
+    let suggestion;
+    try { suggestion = JSON.parse(text); }
+    catch { return res.status(500).json({ ok:false, error:'bad_optimizer_json', raw: text }); }
+
+    return res.json({ ok:true, suggestion });
+  } catch (e) {
+    return res.status(500).json({ ok:false, error:String(e?.message || e) });
   }
 });
 
