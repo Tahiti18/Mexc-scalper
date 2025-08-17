@@ -44,7 +44,7 @@ const SECRET = E('WEBHOOK_SECRET', '');
 const DASHBOARD_TOKEN = E('DASHBOARD_TOKEN', '');
 
 // Defaults
-const DEFAULT_SYMBOL   = E('DEFAULT_SYMBOL', 'BTC/USDT:USDT').toUpperCase();
+const DEFAULT_SYMBOL   = E('DEFAULT_SYMBOL', 'SOL/USDT:USDT').toUpperCase();
 const DEFAULT_NOTIONAL = Number(E('DEFAULT_NOTIONAL_USDT', 20));
 const DEFAULT_LEVERAGE = Number(E('DEFAULT_LEVERAGE', 100));
 const DEFAULT_ISOLATED = String(E('DEFAULT_ISOLATED', 'true')).toLowerCase() === 'true';
