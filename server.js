@@ -551,14 +551,17 @@ app.post('/admin/toggle_dry', (req,res)=>{
 });
 
 // ---- Webhook
-app.post('/webhook', async (req,res)=>{
-  try{
-    if (!verify(req)) return res.status(401).json({ ok:false, error:'unauthorized' });
+app.post('/webhook', async (req, res) => {
+  try {
+    // Log everything TradingView sends
+    console.log("Webhook received:", req.body);
+
+    if (!verify(req)) return res.status(401).json({ ok: false, error: 'unauthorized' });
     ensureBucket();
 
     if (DAILY_PNL_CAP_USDT > 0 && daily.pnl >= DAILY_PNL_CAP_USDT) {
       log(`DAILY CAP reached: ${daily.pnl.toFixed(4)} USDT`);
-      return res.status(423).json({ ok:false, error:'daily_cap' });
+      return res.status(423).json({ ok: false, error: 'daily_cap' });
     }
 
     const b = req.body || {};
@@ -570,20 +573,31 @@ app.post('/webhook', async (req,res)=>{
     const relayTimer = Boolean(b.relayTimer);
     const autoCloseSec = Number(b.autoCloseSec || 0);
 
-    if (!['LONG','SHORT','CLOSE_LONG','CLOSE_SHORT'].includes(signal)) {
-      return res.status(400).json({ ok:false, error:'bad_signal' });
+    if (!['LONG', 'SHORT', 'CLOSE_LONG', 'CLOSE_SHORT'].includes(signal)) {
+      return res.status(400).json({ ok: false, error: 'bad_signal' });
     }
-    if (isHalted(symbol)) return res.status(423).json({ ok:false, error:'halted' });
+    if (isHalted(symbol)) return res.status(423).json({ ok: false, error: 'halted' });
 
     pruneHour();
-    if (tradeTimes.length >= MAX_TRADES_PER_HOUR) return res.status(429).json({ ok:false, error:'rate_limited' });
+    if (tradeTimes.length >= MAX_TRADES_PER_HOUR) {
+      return res.status(429).json({ ok: false, error: 'rate_limited' });
+    }
 
     const sp = await spreadPct(symbol);
-    if (sp > MAX_SPREAD_PCT) return res.status(400).json({ ok:false, error:'wide_spread', spreadPct: sp });
+    if (sp > MAX_SPREAD_PCT) {
+      return res.status(400).json({ ok: false, error: 'wide_spread', spreadPct: sp });
+    }
 
     await ensureLev(symbol, lev);
     const notional = reducedNotional(symbol, baseNotional);
     const amt = await notionalToAmount(symbol, notional);
+
+    // ---- Execute trade
+    const trade = { signal, symbol, lev, notional, amt, relayTimer, autoCloseSec };
+    console.log("Prepared trade:", trade);
+
+    // push to queue or execute
+    enqueueTrade(trade);
 
     // Record exec for feeds/stats
     tradeTimes.push(now());
@@ -592,7 +606,7 @@ app.post('/webhook', async (req,res)=>{
     sseEmit('exec', { ts: now(), symbol, signal, lev, notionalUSDT: notional });
 
     // ---- LIVE: send orders to exchange
-    if (!DRY){
+    if (!DRY) {
       if (signal==='LONG')        await mexc.createMarketBuyOrder(symbol, amt);
       else if (signal==='SHORT')  await mexc.createMarketSellOrder(symbol, amt);
       else if (signal==='CLOSE_LONG')  await mexc.createMarketSellOrder(symbol, amt);
@@ -601,7 +615,7 @@ app.post('/webhook', async (req,res)=>{
       // ---- PAPER: simulate fills so dashboard updates
       const t = await mexc.fetchTicker(symbol).catch(()=>null);
       const px = t?.last || Number(t?.info?.lastPrice) || 0;
-      const feeUSDT = (notional * PAPER_FEE_PCT) / 100; // convert pct → fraction
+      const feeUSDT = (notional * PAPER_FEE_PCT) / 100;
       if (px > 0) {
         if (signal==='LONG' || signal==='CLOSE_SHORT') {
           markFill(symbol, 'buy',  px, amt, feeUSDT);
@@ -611,7 +625,7 @@ app.post('/webhook', async (req,res)=>{
       }
     }
 
-    // Optional timed auto-close (LIVE only; paper already marked a fill)
+    // Optional timed auto-close (LIVE only)
     if (!DRY && relayTimer && autoCloseSec > 0 &&
        (signal === 'LONG' || signal === 'SHORT')) {
       setTimeout(async () => {
@@ -634,7 +648,7 @@ app.post('/webhook', async (req,res)=>{
       }, autoCloseSec * 1000);
     }
 
-    res.json({ ok:true, dry:DRY, symbol, signal, lev, notionalUSDT:notional, autoCloseSec, spreadPct: sp });
+    return res.json({ ok:true, dry:DRY, symbol, signal, lev, notionalUSDT:notional, autoCloseSec, spreadPct: sp });
   } catch(e){
     console.error('webhook error', e);
     res.status(500).json({ ok:false, error:String(e?.message||e) });
