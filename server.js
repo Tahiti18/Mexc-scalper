@@ -554,102 +554,85 @@ app.post('/admin/toggle_dry', (req,res)=>{
 // ---- Webhook
 app.post('/webhook', async (req, res) => {
   try {
-    // Log everything TradingView sends
-    console.log("Webhook received:", req.body);
+    console.log('[WEBHOOK] body:', req.body);
 
-    if (!verify(req)) return res.status(401).json({ ok: false, error: 'unauthorized' });
+    if (!verify(req)) return res.status(401).json({ ok:false, error:'unauthorized' });
     ensureBucket();
 
     if (DAILY_PNL_CAP_USDT > 0 && daily.pnl >= DAILY_PNL_CAP_USDT) {
       log(`DAILY CAP reached: ${daily.pnl.toFixed(4)} USDT`);
-      return res.status(423).json({ ok: false, error: 'daily_cap' });
+      return res.status(423).json({ ok:false, error:'daily_cap' });
     }
 
     const b = req.body || {};
-    const signal = String(b.signal || '').toUpperCase();
-    const rawSymbol = (b.symbol || DEFAULT_SYMBOL).toUpperCase();
-    const symbol = rawSymbol.includes('/') ? rawSymbol : DEFAULT_SYMBOL;
-    const lev = Number(b.leverage || DEFAULT_LEVERAGE);
-    const baseNotional = Number(b.notional || DEFAULT_NOTIONAL);
-    const relayTimer = Boolean(b.relayTimer);
+    const signal       = String(b.signal || '').toUpperCase();
+    const rawSymbol    = (b.symbol || DEFAULT_SYMBOL).toUpperCase();
+    const symbol       = rawSymbol.includes('/') ? rawSymbol : DEFAULT_SYMBOL;
+    const lev          = Number(b.leverage || DEFAULT_LEVERAGE);
+    const baseNotional = Number(b.notional  || DEFAULT_NOTIONAL);
+    const relayTimer   = Boolean(b.relayTimer);
     const autoCloseSec = Number(b.autoCloseSec || 0);
 
-    if (!['LONG', 'SHORT', 'CLOSE_LONG', 'CLOSE_SHORT'].includes(signal)) {
-      return res.status(400).json({ ok: false, error: 'bad_signal' });
+    if (!['LONG','SHORT','CLOSE_LONG','CLOSE_SHORT'].includes(signal)) {
+      return res.status(400).json({ ok:false, error:'bad_signal' });
     }
-    if (isHalted(symbol)) return res.status(423).json({ ok: false, error: 'halted' });
+    if (isHalted(symbol)) return res.status(423).json({ ok:false, error:'halted' });
 
     pruneHour();
     if (tradeTimes.length >= MAX_TRADES_PER_HOUR) {
-      return res.status(429).json({ ok: false, error: 'rate_limited' });
+      return res.status(429).json({ ok:false, error:'rate_limited' });
     }
 
     const sp = await spreadPct(symbol);
     if (sp > MAX_SPREAD_PCT) {
-      return res.status(400).json({ ok: false, error: 'wide_spread', spreadPct: sp });
+      return res.status(400).json({ ok:false, error:'wide_spread', spreadPct: sp });
     }
 
     await ensureLev(symbol, lev);
     const notional = reducedNotional(symbol, baseNotional);
     const amt = await notionalToAmount(symbol, notional);
 
-    // ---- Execute trade (record first)
+    // Record exec for feeds/stats
     tradeTimes.push(now());
-    daily.trades += 1);
+    daily.trades += 1;
     log(`EXEC ${signal} ${symbol} notional=${notional} lev=${lev}`);
     sseEmit('exec', { ts: now(), symbol, signal, lev, notionalUSDT: notional });
 
-    // ---- DEBUG LINE
-    console.log("DEBUG => DRY:", DRY, "signal:", signal, "amt:", amt, "notional:", notional);
-
-    // ---- LIVE: send orders to exchange
-    if (!DRY){
-      if (signal==='LONG')        await mexc.createMarketBuyOrder(symbol, amt);
-      else if (signal==='SHORT')  await mexc.createMarketSellOrder(symbol, amt);
-      else if (signal==='CLOSE_LONG')  await mexc.createMarketSellOrder(symbol, amt);
-      else if (signal==='CLOSE_SHORT') await mexc.createMarketBuyOrder(symbol, amt);
+    // LIVE orders or PAPER fills
+    if (!DRY) {
+      if (signal === 'LONG')              await mexc.createMarketBuyOrder(symbol, amt);
+      else if (signal === 'SHORT')        await mexc.createMarketSellOrder(symbol, amt);
+      else if (signal === 'CLOSE_LONG')   await mexc.createMarketSellOrder(symbol, amt);
+      else if (signal === 'CLOSE_SHORT')  await mexc.createMarketBuyOrder(symbol, amt);
     } else {
-  log(`[PAPER] ${signal} ${symbol} notional=${notional} amt=${amt}`);
-  // ---- PAPER: simulate fills so dashboard updates
-  const t = await mexc.fetchTicker(symbol).catch(()=>null);
+      const t  = await mexc.fetchTicker(symbol).catch(() => null);
       const px = t?.last || Number(t?.info?.lastPrice) || 0;
-      const feeUSDT = (notional * PAPER_FEE_PCT) / 100;
+      const feeUSDT = (notional * PAPER_FEE_PCT) / 100; // 0.07 => 0.07%
       if (px > 0) {
-        if (signal==='LONG' || signal==='CLOSE_SHORT') {
-          markFill(symbol, 'buy',  px, amt, feeUSDT);
-        } else if (signal==='SHORT' || signal==='CLOSE_LONG') {
-          markFill(symbol, 'sell', px, amt, feeUSDT);
-        }
+        if (signal === 'LONG' || signal === 'CLOSE_SHORT') markFill(symbol, 'buy',  px, amt, feeUSDT);
+        else                                               markFill(symbol, 'sell', px, amt, feeUSDT);
       }
     }
 
     // Optional timed auto-close (LIVE only)
-    if (!DRY && relayTimer && autoCloseSec > 0 &&
-       (signal === 'LONG' || signal === 'SHORT')) {
+    if (!DRY && relayTimer && autoCloseSec > 0 && (signal === 'LONG' || signal === 'SHORT')) {
       setTimeout(async () => {
         try {
-          const t2 = await mexc.fetchTicker(symbol).catch(() => null);
+          const t2  = await mexc.fetchTicker(symbol).catch(() => null);
           const px2 = t2?.last || Number(t2?.info?.lastPrice) || 0;
           const amt2 = await notionalToAmount(symbol, notional);
           if (px2 > 0) {
-            if (signal === 'LONG') {
-              await mexc.createMarketSellOrder(symbol, amt2);
-              log(`[autoClose] CLOSED LONG ${symbol} @ ${px2}`);
-            } else if (signal === 'SHORT') {
-              await mexc.createMarketBuyOrder(symbol, amt2);
-              log(`[autoClose] CLOSED SHORT ${symbol} @ ${px2}`);
-            }
+            if (signal === 'LONG')  { await mexc.createMarketSellOrder(symbol, amt2); log(`[autoClose] CLOSED LONG ${symbol} @ ${px2}`); }
+            else                    { await mexc.createMarketBuyOrder(symbol,  amt2); log(`[autoClose] CLOSED SHORT ${symbol} @ ${px2}`); }
           }
-        } catch (e) {
-          log('autoClose error: ' + (e?.message || e));
-        }
+        } catch(e) { log('autoClose error: ' + (e?.message || e)); }
       }, autoCloseSec * 1000);
     }
 
     return res.json({ ok:true, dry:DRY, symbol, signal, lev, notionalUSDT:notional, autoCloseSec, spreadPct: sp });
-  } catch(e){
+  } catch (e) {
     console.error('webhook error', e);
-    res.status(500).json({ ok:false, error:String(e?.message||e) });
+    return res.status(500).json({ ok:false, error:String(e?.message || e) });
   }
 });
 
