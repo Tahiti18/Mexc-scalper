@@ -6,7 +6,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 /**
- * MEXC Scalper Relay — Advanced (NO SIMULATOR)
+ * MEXC Scalper Relay — Advanced
  * - Webhook receiver for TradingView alerts (/webhook)
  * - Guards: rate-limit per hour, spread limit, per-symbol cooldown, loss-streak halt
  * - Paper mode (DRY_RUN=true): simulates fills so charts & stats update
@@ -20,6 +20,7 @@ import { fileURLToPath } from 'url';
  */
 
 const app = express();
+
 // --- Health probe
 app.get('/ping', (req, res) => {
   res.type('text/plain').send('pong');
@@ -64,7 +65,7 @@ const MAX_TRADES_PER_HOUR     = Number(E('MAX_TRADES_PER_HOUR', 60));
 const MAX_SPREAD_PCT          = Number(E('MAX_SPREAD_PCT', 0.03)); // 0.03% default
 const REJECT_IF_THIN_BOOK     = String(E('REJECT_IF_THIN_BOOK','true')).toLowerCase()==='true';
 const COOLDOWN_AFTER_LOSS_SEC = Number(E('COOLDOWN_AFTER_LOSS_SEC', 120));
-const PAPER_FEE_PCT = Number(E('PAPER_FEE_PCT', 0.07));
+const PAPER_FEE_PCT           = Number(E('PAPER_FEE_PCT', 0.07)); // percent of notional
 
 // Loss-streak handling
 const MAX_CONSEC_LOSSES      = Number(E('MAX_CONSEC_LOSSES', 3));
@@ -461,29 +462,29 @@ app.get('/stats/daily', (req, res) => {
   for (const r of rows) {
     const key = dayKey(r.ts);
     if (!map.has(key)) map.set(key, { trades:0, wins:0, losses:0, grossP:0, grossL:0, net:0, startTs:r.ts, endTs:r.ts });
-    const d = map.get(key);
-    d.trades++;
-    if (r.realized > 0){ d.wins++;  d.grossP += r.realized; }
-    if (r.realized < 0){ d.losses++; d.grossL += r.realized; }
-    d.net += r.realized;
-    d.endTs = r.ts;
+    const d2 = map.get(key);
+    d2.trades++;
+    if (r.realized > 0){ d2.wins++;  d2.grossP += r.realized; }
+    if (r.realized < 0){ d2.losses++; d2.grossL += r.realized; }
+    d2.net += r.realized;
+    d2.endTs = r.ts;
   }
 
-  const days = [...map.entries()].map(([key,d])=>{
-    const winRate = d.trades ? (d.wins/d.trades)*100 : 0;
-    const pf = Math.abs(d.grossL) > 1e-12 ? (d.grossP/Math.abs(d.grossL)) : (d.grossP > 0 ? 9999 : 0);
+  const days = [...map.entries()].map(([key,d2])=>{
+    const winRate = d2.trades ? (d2.wins/d2.trades)*100 : 0;
+    const pf = Math.abs(d2.grossL) > 1e-12 ? (d2.grossP/Math.abs(d2.grossL)) : (d2.grossP > 0 ? 9999 : 0);
     return {
       key,
-      startIso: new Date(d.startTs).toISOString(),
-      endIso: new Date(d.endTs).toISOString(),
-      trades: d.trades,
-      wins: d.wins,
-      losses: d.losses,
+      startIso: new Date(d2.startTs).toISOString(),
+      endIso: new Date(d2.endTs).toISOString(),
+      trades: d2.trades,
+      wins: d2.wins,
+      losses: d2.losses,
       winRate: Number(winRate.toFixed(2)),
       profitFactor: Number(pf.toFixed(3)),
-      grossProfit: Number(d.grossP.toFixed(6)),
-      grossLoss: Number(d.grossL.toFixed(6)),
-      net: Number(d.net.toFixed(6))
+      grossProfit: Number(d2.grossP.toFixed(6)),
+      grossLoss: Number(d2.grossL.toFixed(6)),
+      net: Number(d2.net.toFixed(6))
     };
   }).sort((a,b)=>a.startIso.localeCompare(b.startIso));
 
@@ -592,28 +593,21 @@ app.post('/webhook', async (req, res) => {
     const notional = reducedNotional(symbol, baseNotional);
     const amt = await notionalToAmount(symbol, notional);
 
-    // ---- Execute trade
-    const trade = { signal, symbol, lev, notional, amt, relayTimer, autoCloseSec };
-    console.log("Prepared trade:", trade);
-
-    // push to queue or execute
-    enqueueTrade(trade);
-
-        // Record exec for feeds/stats
+    // ---- Execute trade (record first)
     tradeTimes.push(now());
-    daily.trades += 1;
+    daily.trades += 1);
     log(`EXEC ${signal} ${symbol} notional=${notional} lev=${lev}`);
     sseEmit('exec', { ts: now(), symbol, signal, lev, notionalUSDT: notional });
 
-    // ---- DEBUG: confirm values before live orders
+    // ---- DEBUG LINE
     console.log("DEBUG => DRY:", DRY, "signal:", signal, "amt:", amt, "notional:", notional);
 
     // ---- LIVE: send orders to exchange
     if (!DRY){
-      if (signal === 'LONG')        await mexc.createMarketBuyOrder(symbol, amt);
-      else if (signal === 'SHORT')  await mexc.createMarketSellOrder(symbol, amt);
-      else if (signal === 'CLOSE_LONG')  await mexc.createMarketSellOrder(symbol, amt);
-      else if (signal === 'CLOSE_SHORT') await mexc.createMarketBuyOrder(symbol, amt);
+      if (signal==='LONG')        await mexc.createMarketBuyOrder(symbol, amt);
+      else if (signal==='SHORT')  await mexc.createMarketSellOrder(symbol, amt);
+      else if (signal==='CLOSE_LONG')  await mexc.createMarketSellOrder(symbol, amt);
+      else if (signal==='CLOSE_SHORT') await mexc.createMarketBuyOrder(symbol, amt);
     } else {
       // ---- PAPER: simulate fills so dashboard updates
       const t = await mexc.fetchTicker(symbol).catch(()=>null);
