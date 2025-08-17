@@ -81,9 +81,6 @@ const HMAC_ENABLED = String(E('HMAC_ENABLED','false')).toLowerCase()==='true';
 const HMAC_SECRET  = E('HMAC_SECRET','');
 const HMAC_HEADER  = E('HMAC_HEADER','X-Signature');
 
-// Paper mode fee assumption (perc. of notional, e.g. 0.04% taker)
-const PAPER_FEE_PCT = Number(E('PAPER_FEE_PCT', 0.04));
-
 // CORS for Netlify/other dashboard origins (default allow all)
 const NETLIFY_ORIGIN = E('NETLIFY_ORIGIN','*');
 app.use((req, res, next) => {
