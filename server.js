@@ -567,27 +567,39 @@ app.post('/webhook', async (req,res)=>{
     log(`EXEC ${signal} ${symbol} notional=${notional} lev=${lev}`);
     sseEmit('exec', { ts: now(), symbol, signal, lev, notionalUSDT: notional });
 
-    // LIVE: place orders with CCXT
-    if (!DRY){
-      if (signal==='LONG') await mexc.createMarketBuyOrder(symbol, amt);
-      else if (signal==='SHORT') await mexc.createMarketSellOrder(symbol, amt);
-      else if (signal==='CLOSE_LONG') await mexc.createMarketSellOrder(symbol, amt);
-      else if (signal==='CLOSE_SHORT') await mexc.createMarketBuyOrder(symbol, amt);
+    // EXEC event (for live feed) — unified for LIVE & PAPER
+tradeTimes.push(now());
+daily.trades += 1;
+log(`EXEC ${signal} ${symbol} notional=${notional} lev=${lev}`);
+sseEmit('exec', { ts: now(), symbol, signal, lev, notionalUSDT: notional });
+
+// === ORDER HANDLING ===
+// If DRY_RUN=true -> simulate fill so it shows on dashboard
+// If DRY_RUN=false -> place real market order on MEXC
+if (DRY) {
+  // paper fill at current ticker price, include tiny fee so PnL isn't unrealistically perfect
+  const t = await mexc.fetchTicker(symbol).catch(()=>null);
+  const px = t?.last || Number(t?.info?.lastPrice) || 0;
+  if (px > 0) {
+    const feePct = Number(process.env.PAPER_FEE_PCT ?? 0.06); // % of notional; default 0.06% taker
+    const feeUSDT = (notional * (feePct / 100));
+    if (signal === 'LONG' || signal === 'CLOSE_SHORT') {
+      markFill(symbol, 'buy',  px, amt, feeUSDT);
+      log(`[paper] BUY ${symbol} qty=${amt} @ ${px} (fee≈${feeUSDT.toFixed(4)} USDT)`);
+    } else if (signal === 'SHORT' || signal === 'CLOSE_LONG') {
+      markFill(symbol, 'sell', px, amt, feeUSDT);
+      log(`[paper] SELL ${symbol} qty=${amt} @ ${px} (fee≈${feeUSDT.toFixed(4)} USDT)`);
     }
-
-    // PAPER MODE: simulate fills so they appear on the dashboard
-    if (DRY){
-      const t = await mexc.fetchTicker(symbol).catch(()=>null);
-      const px = t?.last || Number(t?.info?.lastPrice) || 0;
-      const feeUSDT = (notional * PAPER_FEE_PCT) / 100;
-
-      if (px > 0) {
-        if (signal === 'LONG' || signal === 'CLOSE_SHORT') {
-          markFill(symbol, 'buy',  px, amt, feeUSDT);
-        } else if (signal === 'SHORT' || signal === 'CLOSE_LONG') {
-          markFill(symbol, 'sell', px, amt, feeUSDT);
-        }
-      }
+  } else {
+    log('[paper] skip fill: no price');
+  }
+} else {
+  // live orders with CCXT
+  if (signal === 'LONG')        await mexc.createMarketBuyOrder(symbol, amt);
+  else if (signal === 'SHORT')  await mexc.createMarketSellOrder(symbol, amt);
+  else if (signal === 'CLOSE_LONG')  await mexc.createMarketSellOrder(symbol, amt);
+  else if (signal === 'CLOSE_SHORT') await mexc.createMarketBuyOrder(symbol, amt);
+}
 
       if (relayTimer && autoCloseSec > 0 && (signal==='LONG' || signal==='SHORT')){
         setTimeout(async ()=>{
