@@ -20,6 +20,10 @@ import { fileURLToPath } from 'url';
  */
 
 const app = express();
+// --- Health probe
+app.get('/ping', (req, res) => {
+  res.type('text/plain').send('pong');
+});
 
 // Capture raw body only for POST-like requests so GET/HEAD never hang
 let rawBody = Buffer.alloc(0);
