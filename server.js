@@ -599,18 +599,21 @@ app.post('/webhook', async (req, res) => {
     // push to queue or execute
     enqueueTrade(trade);
 
-    // Record exec for feeds/stats
+        // Record exec for feeds/stats
     tradeTimes.push(now());
     daily.trades += 1;
     log(`EXEC ${signal} ${symbol} notional=${notional} lev=${lev}`);
     sseEmit('exec', { ts: now(), symbol, signal, lev, notionalUSDT: notional });
 
+    // ---- DEBUG: confirm values before live orders
+    console.log("DEBUG => DRY:", DRY, "signal:", signal, "amt:", amt, "notional:", notional);
+
     // ---- LIVE: send orders to exchange
-    if (!DRY) {
-      if (signal==='LONG')        await mexc.createMarketBuyOrder(symbol, amt);
-      else if (signal==='SHORT')  await mexc.createMarketSellOrder(symbol, amt);
-      else if (signal==='CLOSE_LONG')  await mexc.createMarketSellOrder(symbol, amt);
-      else if (signal==='CLOSE_SHORT') await mexc.createMarketBuyOrder(symbol, amt);
+    if (!DRY){
+      if (signal === 'LONG')        await mexc.createMarketBuyOrder(symbol, amt);
+      else if (signal === 'SHORT')  await mexc.createMarketSellOrder(symbol, amt);
+      else if (signal === 'CLOSE_LONG')  await mexc.createMarketSellOrder(symbol, amt);
+      else if (signal === 'CLOSE_SHORT') await mexc.createMarketBuyOrder(symbol, amt);
     } else {
       // ---- PAPER: simulate fills so dashboard updates
       const t = await mexc.fetchTicker(symbol).catch(()=>null);
