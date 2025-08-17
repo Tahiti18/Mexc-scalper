@@ -48,7 +48,7 @@ app.use((req, res, next) => {
 const E = (k, d = null) => process.env[k] ?? d;
 
 // ---- Core env
-const PORT = Number(E('PORT', 8080));
+const PORT = process.env.PORT || 8080;
 let DRY  = String(E('DRY_RUN', 'true')).toLowerCase() === 'true'; // let so we can toggle at runtime
 const SECRET = E('WEBHOOK_SECRET', '');
 const DASHBOARD_TOKEN = E('DASHBOARD_TOKEN', '');
