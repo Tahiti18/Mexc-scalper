@@ -609,8 +609,9 @@ app.post('/webhook', async (req, res) => {
       else if (signal==='CLOSE_LONG')  await mexc.createMarketSellOrder(symbol, amt);
       else if (signal==='CLOSE_SHORT') await mexc.createMarketBuyOrder(symbol, amt);
     } else {
-      // ---- PAPER: simulate fills so dashboard updates
-      const t = await mexc.fetchTicker(symbol).catch(()=>null);
+  log(`[PAPER] ${signal} ${symbol} notional=${notional} amt=${amt}`);
+  // ---- PAPER: simulate fills so dashboard updates
+  const t = await mexc.fetchTicker(symbol).catch(()=>null);
       const px = t?.last || Number(t?.info?.lastPrice) || 0;
       const feeUSDT = (notional * PAPER_FEE_PCT) / 100;
       if (px > 0) {
